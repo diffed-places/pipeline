@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 
 #[derive(Serialize, Deserialize, Debug)]
 struct Place {
@@ -19,7 +20,29 @@ struct Place {
 }
 
 pub fn import_atp(input: &PathBuf) -> Result<()> {
-    let file = File::open(input).with_context(|| format!("could not open file `{:?}`", input))?;
+    let mut ra: Result<()> = Ok(());
+    let mut rb: Result<()> = Ok(());
+    let (tx, rx) = sync_channel(1000);
+    rayon::scope(|s| {
+        s.spawn(|_| ra = process_places(rx));
+        s.spawn(|_| rb = process_zip(input, tx));
+    });
+    ra?;
+    rb?;
+    Ok(())
+}
+
+fn process_places(channel: Receiver<Place>) -> Result<()> {
+    let mut num_places = 0;
+    for _place in channel.iter() {
+        num_places += 1;
+    }
+    println!("got {} places", num_places);
+    Ok(())
+}
+
+fn process_zip(path: &PathBuf, channel: SyncSender<Place>) -> Result<()> {
+    let file = File::open(path).with_context(|| format!("could not open file `{:?}`", path))?;
     let mapping = unsafe { Mmap::map(&file).context("Couldn't mmap zip file")? };
     let archive = ZipArchive::with_prepended_data(&mapping)
         .context("Couldn't load archive")?
@@ -27,16 +50,15 @@ pub fn import_atp(input: &PathBuf) -> Result<()> {
     archive.entries().par_iter().try_for_each(|entry| {
         if entry.size > 0 {
             let reader = archive.read(entry)?;
-            process_geojson(reader)?;
+            process_geojson(reader, channel.clone())?;
         }
         Ok(())
     })?;
     Ok(())
 }
 
-fn process_geojson<T: Read>(reader: T) -> Result<()> {
+fn process_geojson<T: Read>(reader: T, channel: SyncSender<Place>) -> Result<()> {
     let buffer = BufReader::new(reader);
-    let mut spider_attrs = serde_json::from_str("{}")?;
     for line in buffer.lines() {
         let line = line?;
 
@@ -45,9 +67,7 @@ fn process_geojson<T: Read>(reader: T) -> Result<()> {
             let mut json = String::from(line);
             json.push_str("]}");
             let val: serde_json::Value = serde_json::from_str(&json)?;
-            if let Some(attrs) = val.get("dataset_attributes") {
-                spider_attrs = attrs.clone();
-            }
+            if let Some(_attrs) = val.get("dataset_attributes") {}
             continue;
         }
 
@@ -65,9 +85,8 @@ fn process_geojson<T: Read>(reader: T) -> Result<()> {
         let Some(place) = make_place(trimmed) else {
             continue;
         };
-        println!("*** GIRAFFE {:?}", place);
+        channel.send(place)?;
     }
-    println!("{:?}", spider_attrs);
     Ok(())
 }
 
