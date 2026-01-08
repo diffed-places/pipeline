@@ -28,7 +28,7 @@ pub fn import_atp(input: &Path, output: &Path) -> Result<()> {
 }
 
 fn process_places(places: Receiver<Place>, out: &Path) -> Result<()> {
-    let mut writer = ParquetWriter::new(out)?;
+    let mut writer = ParquetWriter::try_new(/* batch size */ 64 * 1024, out)?;
     let sorter: ExternalSorter<Place, std::io::Error, MemoryLimitedBufferBuilder> =
         ExternalSorterBuilder::new()
             .with_tmp_dir(Path::new("./"))
@@ -40,6 +40,7 @@ fn process_places(places: Receiver<Place>, out: &Path) -> Result<()> {
         num_places += 1;
         writer.write(place?)?;
     }
+    writer.close()?;
     println!("got {} places", num_places);
     Ok(())
 }
