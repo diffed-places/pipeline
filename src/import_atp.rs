@@ -1,5 +1,4 @@
 use anyhow::{Context, Ok, Result};
-use arrow::datatypes::{DataType, Field, Schema};
 use ext_sort::{buffer::mem::MemoryLimitedBufferBuilder, ExternalSorter, ExternalSorterBuilder};
 use geo::algorithm::line_measures::Haversine;
 use geo::{InteriorPoint, InterpolateLine, Point};
@@ -7,58 +6,19 @@ use geojson::GeoJson;
 use memmap2::Mmap;
 use piz::ZipArchive;
 use rayon::prelude::*;
-use serde::{Deserialize, Serialize};
-use std::cmp::Ordering;
-use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufRead, BufReader, BufWriter, Read, Write};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
-use wkb::writer::point_wkb_size;
 
-#[derive(Serialize, Deserialize, Debug)]
-struct Place {
-    s2_cell_id: u64,
-    point: geo::Point,
-    tags: Vec<(String, String)>,
-}
+use crate::place::{ParquetWriter, Place};
 
-impl deepsize::DeepSizeOf for Place {
-    fn deep_size_of_children(&self, context: &mut deepsize::Context) -> usize {
-        8 + 16 + self.tags.deep_size_of_children(context)
-    }
-}
-
-// Implement Eq (marker trait, no methods to implement)
-impl Eq for Place {}
-
-impl Ord for Place {
-    fn cmp(&self, other: &Self) -> Ordering {
-        //println!("cmp({}, {})", self.s2_cell_id, other.s2_cell_id);
-        self.s2_cell_id
-            .cmp(&other.s2_cell_id)
-            .then(self.tags.cmp(&other.tags))
-    }
-}
-
-impl PartialEq for Place {
-    fn eq(&self, other: &Self) -> bool {
-        self.s2_cell_id == other.s2_cell_id && self.tags == other.tags
-    }
-}
-
-impl PartialOrd for Place {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-pub fn import_atp(input: &PathBuf) -> Result<()> {
+pub fn import_atp(input: &PathBuf, output: &Path) -> Result<()> {
     // To avoid deadlock, we must not use Rayon threads here.
     // https://dev.to/sgchris/scoped-threads-with-stdthreadscope-in-rust-163-48f9
     let (tx, rx) = sync_channel(50_000);
     let (ra, rb) = std::thread::scope(|s| {
-        let r1 = s.spawn(|| process_places(rx));
+        let r1 = s.spawn(|| process_places(rx, output));
         let r2 = s.spawn(|| process_zip(input, tx));
         (r1.join().unwrap(), r2.join().unwrap())
     });
@@ -67,20 +27,18 @@ pub fn import_atp(input: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn process_places(places: Receiver<Place>) -> Result<()> {
-    let _schema = make_parquet_schema();
-    let mut out = BufWriter::new(File::create("output.txt")?);
+fn process_places(places: Receiver<Place>, out: &Path) -> Result<()> {
+    let mut writer = ParquetWriter::new(out)?;
     let sorter: ExternalSorter<Place, std::io::Error, MemoryLimitedBufferBuilder> =
         ExternalSorterBuilder::new()
             .with_tmp_dir(Path::new("./"))
             .with_buffer(MemoryLimitedBufferBuilder::new(150_000_000))
             .build()?;
-
     let sorted = sorter.sort(places.iter().map(std::io::Result::Ok))?;
     let mut num_places = 0;
     for place in sorted {
         num_places += 1;
-        out.write_all(format!("{}\n", place?.s2_cell_id).as_bytes())?;
+        writer.write(place?)?;
     }
     println!("got {} places", num_places);
     Ok(())
@@ -138,35 +96,57 @@ fn process_geojson<T: Read>(reader: T, channel: SyncSender<Place>) -> Result<()>
 fn make_place(geojson: &str) -> Option<Place> {
     let parsed = geojson.parse::<GeoJson>().ok()?;
     let point = find_point(&parsed)?;
-    let s2_lat_lng = s2::latlng::LatLng::from_degrees(point.y(), point.x());
-    let s2_cell_id = s2::cellid::CellID::from(s2_lat_lng).0;
     let GeoJson::Feature(feature) = parsed else {
         return None;
     };
-    let tags = properties_to_tags(&feature.properties?);
-    Some(Place {
-        s2_cell_id,
-        point,
-        tags,
-    })
-}
+    let properties = feature.properties?;
 
-fn properties_to_tags(
-    properties: &serde_json::Map<String, serde_json::Value>,
-) -> Vec<(String, String)> {
-    let mut tags: Vec<(String, String)> = properties
-        .iter()
-        .filter_map(|(key, value)| {
-            // Only keep properties where the value is a string.
-            if let serde_json::Value::String(s) = value {
-                Some((key.clone(), s.clone()))
-            } else {
-                None
-            }
-        })
-        .collect();
-    tags.sort();
-    tags
+    let mut source_id: Option<String> = None;
+    let mut source_url: Option<String> = None;
+
+    // We strip three properties ("nsi_id", "@spider", "@source_uri") from tags,
+    // so we do not need to reserve space for them.
+    let num_tags = properties.len();
+    let mut tags =
+        Vec::<(String, String)>::with_capacity(if num_tags > 3 { num_tags - 3 } else { num_tags });
+
+    for (key, val) in properties {
+        // All The Places inserts an "nsi_id" for any features
+        // that are matches for the OSM Name Suggestion Index.
+        // Since this is purely internal to debugging All The Places,
+        // we strip off this property here.
+        if key == "nsi_id" || key.is_empty() {
+            continue;
+        }
+
+        let value = match val {
+            serde_json::Value::String(v) => Some(v),
+            serde_json::Value::Bool(v) => Some(v.to_string()),
+            serde_json::Value::Number(v) => Some(v.to_string()),
+            _ => None,
+        };
+        let Some(mut value) = value else {
+            continue;
+        };
+
+        if key == "@spider" {
+            value.insert_str(0, "atp/");
+            source_id = Some(value);
+            continue;
+        }
+
+        if key == "@source_uri" {
+            source_url = Some(value);
+            continue;
+        }
+
+        if key.starts_with('@') || value.is_empty() {
+            continue;
+        }
+
+        tags.push((key, value));
+    }
+    Place::new(&point, source_id?, source_url, tags)
 }
 
 /// Finds a representative point for a GeoJson feature.
@@ -193,30 +173,9 @@ fn find_point(geojson: &GeoJson) -> Option<Point> {
     }
 }
 
-fn make_parquet_schema() -> Schema {
-    use std::sync::Arc;
-
-    // Metadata for GEOMETRY logical type
-    let mut point_metadata = HashMap::new();
-    point_metadata.insert(
-        "ARROW:extension:metadata".to_string(),
-        r#"{"logicalType": "GEOMETRY"}"#.to_string(),
-    );
-    let point_size = point_wkb_size(geo_traits::Dimensions::Xy);
-    Schema::new(vec![
-        Field::new("point", DataType::FixedSizeBinary(point_size as i32), false)
-            .with_metadata(point_metadata),
-        Field::new(
-            "tags",
-            DataType::Map(Arc::new(Field::new("entries", DataType::Utf8, true)), false),
-            false,
-        ),
-        Field::new("spider", DataType::Utf8, false),
-    ])
-}
-
 #[cfg(test)]
 mod tests {
+    use crate::place::Place;
     use geo::Point;
     use geojson::GeoJson;
 
@@ -242,7 +201,8 @@ mod tests {
        "properties": {
            "@spider": "bern_ch",
            "highway": "residential",
-           "bicycle_road": "yes"
+           "bicycle_road": "yes",
+           "@source_uri": "https://map.bern.ch/ogd/poi_velo/poi_velo_json.zip"
        },
        "geometry": {
            "type": "LineString",
@@ -301,27 +261,29 @@ mod tests {
         assert!((pt.y() - 25.3935).abs() < 1e-3);
     }
 
-    fn format_tags(tags: &Vec<(String, String)>) -> Vec<String> {
-        tags.into_iter()
-            .map(|(k, v)| format!("{}={}", k, v))
+    fn tags<'a>(place: &'a Place) -> Vec<(&'a str, &'a str)> {
+        place
+            .tags
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
             .collect()
     }
 
     #[test]
     fn test_make_place() {
         let place = super::make_place(PLAYGROUND).unwrap();
-        assert_eq!(place.s2_cell_id, 5159605115004699013);
-        assert!((place.point.x() - 8.7339982).abs() < 1e-7);
-        assert!((place.point.y() - 47.5039168).abs() < 1e-7);
+	assert_eq!(place.lon_e7, 8_7339982);
+	assert_eq!(place.lat_e7, 47_5039168);
+        assert_eq!(place.source_id, "atp/winterthur_ch");
+        assert_eq!(place.source_url, None);
         assert_eq!(
-            format_tags(&place.tags),
+            tags(&place),
             [
-                "@spider=winterthur_ch",
-                "addr:city=Winterthur",
-                "addr:street=Hermann-Götz-Strasse",
-                "leisure=playground",
-                "operator=Stadtgrün Winterthur",
-                "operator:wikidata=Q56825906"
+                ("addr:city", "Winterthur"),
+                ("addr:street", "Hermann-Götz-Strasse"),
+                ("leisure", "playground"),
+                ("operator", "Stadtgrün Winterthur"),
+                ("operator:wikidata", "Q56825906"),
             ]
         );
     }
@@ -329,12 +291,17 @@ mod tests {
     #[test]
     fn test_make_place_for_line_string() {
         let place = super::make_place(BICYCLE_ROAD).unwrap();
-        assert_eq!(place.s2_cell_id, 5156122231380170133);
-        assert!((place.point.x() - 7.4593195).abs() < 1e-6);
-        assert!((place.point.y() - 46.9423753).abs() < 1e-6);
+	assert_eq!(place.lon_e7, 7_4593195);
+	assert_eq!(place.lat_e7, 46_9423753);
+        assert_eq!(place.source_id, "atp/bern_ch");
+	let source_url = place.source_url.clone().unwrap();
         assert_eq!(
-            format_tags(&place.tags),
-            ["@spider=bern_ch", "bicycle_road=yes", "highway=residential"]
+            source_url,
+            "https://map.bern.ch/ogd/poi_velo/poi_velo_json.zip"
+        );
+        assert_eq!(
+            tags(&place),
+            [("bicycle_road", "yes"), ("highway", "residential"),]
         );
     }
 }
