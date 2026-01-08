@@ -8,12 +8,12 @@ use piz::ZipArchive;
 use rayon::prelude::*;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 
 use crate::place::{ParquetWriter, Place};
 
-pub fn import_atp(input: &PathBuf, output: &Path) -> Result<()> {
+pub fn import_atp(input: &Path, output: &Path) -> Result<()> {
     // To avoid deadlock, we must not use Rayon threads here.
     // https://dev.to/sgchris/scoped-threads-with-stdthreadscope-in-rust-163-48f9
     let (tx, rx) = sync_channel(50_000);
@@ -44,7 +44,7 @@ fn process_places(places: Receiver<Place>, out: &Path) -> Result<()> {
     Ok(())
 }
 
-fn process_zip(path: &PathBuf, channel: SyncSender<Place>) -> Result<()> {
+fn process_zip(path: &Path, channel: SyncSender<Place>) -> Result<()> {
     let file = File::open(path).with_context(|| format!("could not open file `{:?}`", path))?;
     let mapping = unsafe { Mmap::map(&file).context("Couldn't mmap zip file")? };
     let archive = ZipArchive::with_prepended_data(&mapping)
