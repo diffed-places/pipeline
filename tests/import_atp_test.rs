@@ -9,7 +9,11 @@ fn test_import_atp() {
     test_data.push("tests/test_data");
     let mut input_zip = test_data.clone();
     input_zip.push("alltheplaces.zip");
-    cmd.arg("import-atp").arg("--input").arg(&input_zip);
+    cmd.arg("import-atp")
+        .arg("--input")
+        .arg(&input_zip)
+        .arg("--output")
+        .arg("tmp.parquet");
     cmd.assert().success();
 }
 
@@ -18,7 +22,9 @@ fn test_import_atp_bad_input_path() {
     let mut cmd = Command::new(cargo_bin!("diffed-places"));
     cmd.arg("import-atp")
         .arg("--input")
-        .arg("test/file/does-not-exist");
+        .arg("test/file/does-not-exist")
+        .arg("--output")
+        .arg("tmp.parquet");
     cmd.assert()
         .failure()
         .stderr(predicates::str::contains("could not open file"))
