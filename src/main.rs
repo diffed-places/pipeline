@@ -30,8 +30,8 @@ enum Commands {
         #[arg(short, long, value_name = "alltheplaces.parquet")]
         places: PathBuf,
 
-        #[arg(short, long, value_name = "spatial-coverage")]
-        out_spatial_coverage: PathBuf,
+        #[arg(short, long, value_name = "coverage")]
+        output: PathBuf,
     },
 }
 
@@ -41,11 +41,8 @@ fn main() -> Result<()> {
         Some(Commands::ImportAtp { input, output }) => {
             import_atp(input, output)?;
         }
-        Some(Commands::BuildCoverage {
-            places,
-            out_spatial_coverage,
-        }) => {
-            build_coverage(places, out_spatial_coverage)?;
+        Some(Commands::BuildCoverage { places, output }) => {
+            build_coverage(places, output)?;
         }
         None => {
             eprintln!("no subcommand given");
