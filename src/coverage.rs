@@ -1,3 +1,4 @@
+pub use reader::Coverage;
 pub use writer::build_coverage;
 
 /// The granularity of S2 cells we use to represent spatial coverage.
@@ -19,8 +20,172 @@ const S2_GRANULARITY_LEVEL: u8 = 19;
 /// level of granularity.
 const S2_CELL_ID_SHIFT: u8 = 64 - (3 + 2 * S2_GRANULARITY_LEVEL);
 
+mod reader {
+    use anyhow::{Ok, Result, anyhow};
+    use memmap2::Mmap;
+    use s2::cellid::CellID;
+    use std::fs::File;
+    use std::path::Path;
+
+    #[allow(dead_code)] // TODO: Remove attribute once we use this function.
+    pub struct Coverage {
+        file: File,
+        mmap: Mmap,
+
+        num_runs: usize,
+        run_starts: *const u64,
+        run_lengths: *const u8,
+    }
+
+    impl Coverage {
+        #[allow(dead_code)] // TODO: Remove attribute once we use this function.
+        pub fn is_covering(&self, _cell: &CellID) -> bool {
+            // SAFETY: Alignment and bounds checked by get_offset_size().
+            let (_run_starts, _run_lenghts) = unsafe {
+                (
+                    std::slice::from_raw_parts(self.run_starts, self.num_runs),
+                    std::slice::from_raw_parts(self.run_lengths, self.num_runs),
+                )
+            };
+
+            todo!()
+        }
+
+        pub fn load(path: &Path) -> Result<Coverage> {
+            let file = File::open(path)?;
+
+            // SAFETY: No other process writes to the file while we read it.
+            let mmap = unsafe { Mmap::map(&file)? };
+
+            Self::check_signature(&mmap)?;
+
+            let (run_starts_offset, run_starts_size) = Self::get_offset_size(b"runstart", &mmap, 8)
+                .ok_or(anyhow!("no \"runstart\" in coverage file {:?}", path))?;
+            let (run_lengths_offset, run_lengths_size) =
+                Self::get_offset_size(b"runlengt", &mmap, 1)
+                    .ok_or(anyhow!("no \"runlengt\" in coverage file {:?}", path))?;
+            if run_starts_size != run_lengths_size * 8 {
+                return Err(anyhow!("inconsistent number of runs in {:?}", path));
+            }
+            let num_runs = run_lengths_size;
+
+            // SAFETY: Alignment and bounds checked by get_offset_size().
+            let run_starts = unsafe { mmap.as_ptr().add(run_starts_offset) as *const u64 };
+            let run_lengths = unsafe { mmap.as_ptr().add(run_lengths_offset) };
+
+            Ok(Coverage {
+                file,
+                mmap,
+                num_runs,
+                run_starts,
+                run_lengths,
+            })
+        }
+
+        fn check_signature(data: &[u8]) -> Result<()> {
+            if data.len() < 24 || &data[0..24] != b"diffed-places coverage\0\0" {
+                return Err(anyhow!("malformed coverage file"));
+            }
+            Ok(())
+        }
+
+        // This implementation only works on 64-bit processors. Theoretically,
+        // we could write a special implementation for 32-bit platforms, which
+        // would either have to restrict its input to files smaller than 4 GiB.
+        // However, since we’re not doing a retro-computing project, we’ll never
+        // execute our code on such machines.
+        #[cfg(target_pointer_width = "64")]
+        fn get_offset_size(id: &[u8; 8], bytes: &[u8], alignment: usize) -> Option<(usize, usize)> {
+            if bytes.len() < 32 {
+                return None;
+            }
+            let num_headers = u64::from_le_bytes(bytes[24..32].try_into().ok()?) as usize;
+            if bytes.len() < 32 + num_headers * 24 {
+                return None;
+            }
+            for i in 0..num_headers {
+                let pos = 32 + i * 24;
+                if *id == bytes[pos..pos + 8] {
+                    let offset =
+                        u64::from_le_bytes(bytes[pos + 8..pos + 16].try_into().ok()?) as usize;
+                    let size =
+                        u64::from_le_bytes(bytes[pos + 16..pos + 24].try_into().ok()?) as usize;
+                    if bytes.len() >= offset + size
+                        && offset.is_multiple_of(alignment)
+                        && size.is_multiple_of(alignment)
+                    {
+                        return Some((offset, size));
+                    }
+                }
+            }
+            None
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::Coverage;
+
+        #[test]
+        fn test_check_signature() {
+            assert!(Coverage::check_signature(b"").is_err());
+            assert!(Coverage::check_signature(b"foo").is_err());
+            assert!(Coverage::check_signature(b"diffed-places coverage\0\x01").is_err());
+            assert!(Coverage::check_signature(b"diffed-places coverage\0\0\0\0\0\0").is_ok());
+        }
+
+        #[test]
+        fn test_get_offset_size() {
+            // Construct a coverage file with two keys in its header.
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(b"diffed-places coverage\0\0");
+            bytes.extend_from_slice(&2_u64.to_le_bytes());
+            assert!(Coverage::get_offset_size(b"some_key", &bytes, 1) == None);
+            for (key, offset, size) in [(b"some_key", 80, 16), (b"otherkey", 83, 2)] {
+                bytes.extend_from_slice(key as &[u8; 8]);
+                bytes.extend_from_slice(&(offset as u64).to_le_bytes());
+                bytes.extend_from_slice(&(size as u64).to_le_bytes());
+            }
+            bytes.extend_from_slice(&0xdeadbeefcafefeed_u64.to_le_bytes());
+            bytes.extend_from_slice(&42_u64.to_le_bytes());
+            let bytes = bytes.as_ref();
+
+            // The file header has no entry for key "in-exist".
+            assert_eq!(Coverage::get_offset_size(b"in-exist", bytes, 1), None);
+
+            // The data for "some_key" starts at offset 80 and is 16 bytes, which is
+            // correctly aligned for single-byte, 8-byte and 16-byte access.
+            // However, it would be unsafe (at least on RISC CPUs) to perform 32-byte
+            // access, eg. loading a SIMD register, because 80 is not divisible by 32.
+            // Also, the data size is too small to read 32-byte entitites anyway.
+            assert_eq!(
+                Coverage::get_offset_size(b"some_key", bytes, 1),
+                Some((80, 16))
+            );
+            assert_eq!(
+                Coverage::get_offset_size(b"some_key", bytes, 2),
+                Some((80, 16))
+            );
+            assert_eq!(
+                Coverage::get_offset_size(b"some_key", bytes, 8),
+                Some((80, 16))
+            );
+            assert_eq!(Coverage::get_offset_size(b"some_key", bytes, 32), None);
+
+            // The data for "otherkey" starts at offset 83 and is 2 bytes long.
+            // Access is only safe with single-byte alignment.
+            assert_eq!(
+                Coverage::get_offset_size(b"otherkey", bytes, 1),
+                Some((83, 2))
+            );
+            assert_eq!(Coverage::get_offset_size(b"otherkey", bytes, 2), None);
+            assert_eq!(Coverage::get_offset_size(b"otherkey", bytes, 8), None);
+        }
+    }
+}
+
 mod writer {
-    use super::{S2_CELL_ID_SHIFT, S2_GRANULARITY_LEVEL};
+    use super::{Coverage, S2_CELL_ID_SHIFT, S2_GRANULARITY_LEVEL};
     use anyhow::{Ok, Result, anyhow};
     use ext_sort::{ExternalSorter, ExternalSorterBuilder, buffer::LimitedBufferBuilder};
     use parquet::file::reader::{FileReader, SerializedFileReader};
@@ -48,7 +213,15 @@ mod writer {
             let producer = s.spawn(|| read_places(places, tx));
             let consumer = s.spawn(|| build_spatial_coverage(rx, output));
             producer.join().unwrap().and(consumer.join().unwrap())
-        })
+        })?;
+
+        // As a sanity check, let’s try to open the freshly generated file.
+        // This verifies the presence of the correct file signature, and that
+        // the run_starts and run_lengths array are correctly aligned and
+        // within allowable bounds.
+        _ = Coverage::load(output)?;
+
+        Ok(())
     }
 
     fn read_places(places: &Path, covering: SyncSender<CellID>) -> Result<()> {
