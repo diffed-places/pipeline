@@ -6,7 +6,7 @@ pub use writer::build_coverage;
 /// At level 19, An S2 cell is about 15 to 20 meters wide, see [S2 Cell
 /// Statistics](https://s2geometry.io/resources/s2cell_statistics.html).
 /// For an interactive visualization, see [S2 Region Coverer Online
-/// Viewer](https://igorgatis.github.io/ws2/ for a visualization).
+// Viewer](https://igorgatis.github.io/ws2/ for a visualization).
 const S2_GRANULARITY_LEVEL: u8 = 19;
 
 /// To store the coverage map as a bitvector in a more compact form,
@@ -21,34 +21,41 @@ const S2_GRANULARITY_LEVEL: u8 = 19;
 const S2_CELL_ID_SHIFT: u8 = 64 - (3 + 2 * S2_GRANULARITY_LEVEL);
 
 mod reader {
+    use super::S2_CELL_ID_SHIFT;
     use anyhow::{Ok, Result, anyhow};
     use memmap2::Mmap;
     use s2::cellid::CellID;
     use std::fs::File;
     use std::path::Path;
 
-    #[allow(dead_code)] // TODO: Remove attribute once we use this function.
+    #[allow(dead_code)] // TODO: Remove attribute once we use this struct.
     pub struct Coverage {
         file: File,
         mmap: Mmap,
 
         num_runs: usize,
-        run_starts: *const u64,
-        run_lengths: *const u8,
+        run_starts_offset: usize,
+        run_lengths_offset: usize,
     }
 
     impl Coverage {
         #[allow(dead_code)] // TODO: Remove attribute once we use this function.
-        pub fn is_covering(&self, _cell: &CellID) -> bool {
-            // SAFETY: Alignment and bounds checked by get_offset_size().
-            let (_run_starts, _run_lenghts) = unsafe {
-                (
-                    std::slice::from_raw_parts(self.run_starts, self.num_runs),
-                    std::slice::from_raw_parts(self.run_lengths, self.num_runs),
-                )
+        pub fn is_covering(&self, cell: &CellID) -> bool {
+            // SAFETY: Alignment and bounds already checked by get_offset_size().
+            let run_starts = unsafe {
+                let ptr = self.mmap.as_ptr().add(self.run_starts_offset) as *const u64;
+                std::slice::from_raw_parts(ptr, self.num_runs)
             };
 
-            todo!()
+            let value: u64 = cell.0 >> S2_CELL_ID_SHIFT;
+            let index = run_starts.partition_point(|&start| start <= value);
+            if index > 0 {
+                let start = run_starts[index - 1];
+                let limit = start + self.mmap[self.run_lengths_offset + index - 1] as u64;
+                start <= value && value <= limit
+            } else {
+                false
+            }
         }
 
         pub fn load(path: &Path) -> Result<Coverage> {
@@ -69,16 +76,12 @@ mod reader {
             }
             let num_runs = run_lengths_size;
 
-            // SAFETY: Alignment and bounds checked by get_offset_size().
-            let run_starts = unsafe { mmap.as_ptr().add(run_starts_offset) as *const u64 };
-            let run_lengths = unsafe { mmap.as_ptr().add(run_lengths_offset) };
-
             Ok(Coverage {
                 file,
                 mmap,
                 num_runs,
-                run_starts,
-                run_lengths,
+                run_starts_offset,
+                run_lengths_offset,
             })
         }
 
@@ -415,17 +418,10 @@ mod writer {
             let mut reader = BufReader::new(File::open(run_lengths_path)?);
             std::io::copy(&mut reader, &mut self.writer)?;
             remove_file(run_lengths_path)?;
-
-            // todo: add runs at end of file
             self.write_headers(&[
                 ("runstart", self.run_starts_pos, self.num_runs * 8),
                 ("runlengt", run_lengths_pos, self.num_runs),
             ])?;
-
-            println!(
-                "got num_values={} num_runs={}",
-                self.num_values, self.num_runs
-            );
             Ok(())
         }
 
@@ -460,9 +456,12 @@ mod writer {
 
     #[cfg(test)]
     mod tests {
-        use super::{S2_CELL_ID_SHIFT, S2_GRANULARITY_LEVEL, build_coverage};
+        use super::super::Coverage;
+        use super::{CoverageWriter, S2_CELL_ID_SHIFT, S2_GRANULARITY_LEVEL, build_coverage};
+        use anyhow::{Ok, Result};
         use s2::cellid::CellID;
         use std::path::PathBuf;
+        use tempfile::NamedTempFile;
 
         #[test]
         fn test_cell_id_shift() {
@@ -478,6 +477,39 @@ mod writer {
             atp.push("tests/test_data/alltheplaces.parquet");
             let spatial_cov = PathBuf::from("test_build_coverage.spatial-coverage");
             build_coverage(&atp, &spatial_cov).unwrap();
+        }
+
+        #[test]
+        fn test_coverage_writer() -> Result<()> {
+            let temp_file = NamedTempFile::new()?;
+            let mut writer = CoverageWriter::try_new(temp_file.path())?;
+            writer.write(7)?;
+            for i in 1000..=1258 {
+                writer.write(i)?;
+            }
+            writer.close()?;
+
+            let cov = Coverage::load(temp_file.path())?;
+            for i in &[0, 5, 6, 8, 9, 999, 1259] {
+                let cell = CellID(i << S2_CELL_ID_SHIFT);
+                assert!(
+                    !cov.is_covering(&cell),
+                    "cell {:?} for i={} should not be covered, but is",
+                    cell,
+                    i,
+                );
+            }
+            for i in &[7, 1000, 1001, 1002, 1111, 1254, 1255, 1256, 1257, 1258] {
+                let cell = CellID(i << S2_CELL_ID_SHIFT);
+                assert!(
+                    cov.is_covering(&cell),
+                    "cell {:?} for i={} should be covered, but is not",
+                    cell,
+                    i,
+                );
+            }
+
+            Ok(())
         }
     }
 }
