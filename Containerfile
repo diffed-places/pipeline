@@ -21,13 +21,6 @@ COPY Cargo.toml Cargo.lock .
 COPY src src
 COPY tests tests
 
-# Our Continuous Integration does not seem to be able to execute
-# any commands when building on ARM for ARM. To debug the issue,
-# let’s see if we can at least print a message from here.
-# TODO: Remove this once we’re found the problem.
-RUN echo "Hello world, greetings from an echo in a Containerfile."
-RUN uname -a
-
 RUN apk add --no-cache syft
 RUN cargo build --release
 RUN cargo test --release
