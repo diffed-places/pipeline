@@ -55,6 +55,7 @@ jobs:
             --build-arg BUILD_TIMESTAMP="${{ steps.commit.outputs.timestamp }}" \
             --build-arg VCS_REF="${{ github.sha }}" \
             --build-arg VCS_URL="${{ github.server_url }}/${{ github.repository }}" \
+            --squash \
             -f ./Containerfile \
             -t $IMAGE \
             .
