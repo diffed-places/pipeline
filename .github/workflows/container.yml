@@ -100,13 +100,13 @@ jobs:
       - name: Download artifacts of previous build phases
         uses: actions/download-artifact@v6
 
-      - name: List directory contents for debugging
+      - name: Pull ARM image by digest for debugging
         run: |
-          ls -l
-
-      - name: List ARM artifacts for debugging
-        run: |
-          ls -l artifacts-${{ github.sha }}-arm64
+          ARM_DIGEST=`cat artifacts-${{ github.sha }}-arm64/digest.txt`
+          echo ARM digest is $ARM_DIGEST
+          ARM_IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${ARM_DIGEST}
+          echo ARM image is $ARM_IMAGE
+          podman pull $ARM_IMAGE
 
       - name: Pull architecture-specific containers
         run: |
@@ -114,10 +114,21 @@ jobs:
           podman pull ${IMAGE}-amd64
           podman pull ${IMAGE}-arm64
 
-      - name: Create and push manifest with sha tag
+      - name: Create and push manifests
         run: |
-          IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
-          podman manifest create ${IMAGE}
-          podman manifest add ${IMAGE} ${IMAGE}-amd64
-          podman manifest add ${IMAGE} ${IMAGE}-arm64
-          podman manifest push ${IMAGE}
+          IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          IMAGE_SHA=${IMAGE}:${{ github.sha }}
+          IMAGE_LATEST=${IMAGE}:latest
+
+          AMD_DIGEST=`cat artifacts-${{ github.sha }}-amd64/digest.txt`
+          ARM_DIGEST=`cat artifacts-${{ github.sha }}-arm64/digest.txt`
+
+          podman manifest create ${IMAGE_SHA}
+          podman manifest add ${IMAGE_SHA} ${IMAGE_SHA}-amd64
+          podman manifest add ${IMAGE_SHA} ${IMAGE_SHA}-arm64
+          podman manifest push ${IMAGE_SHA}
+
+          podman manifest create ${IMAGE_LATEST}
+          podman manifest ${IMAGE_LATEST} ${IMAGE_SHA}-amd64
+          podman manifest ${IMAGE_LATEST} ${IMAGE_SHA}-arm64
+          podman manifest push ${IMAGE}:latest
