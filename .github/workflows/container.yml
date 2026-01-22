@@ -41,7 +41,7 @@ jobs:
           echo "${{ secrets.GITHUB_TOKEN }}" | podman login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
 
       - name: Get commit timestamp
-        id: commit
+        id: commit-info
         run: |
           TIMESTAMP=$(git log -1 --format=%cI ${{ github.sha }})
           echo "timestamp=$TIMESTAMP" >> $GITHUB_OUTPUT
@@ -50,18 +50,26 @@ jobs:
         id: build
         run: |
           IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}-${{ matrix.arch }}
+          TIMESTAMP=${{ steps.commit-info.outputs.timestamp }}
           mkdir artifacts
           podman build \
-            --platform ${{ matrix.platform }} \
-            --build-arg BUILD_TIMESTAMP="${{ steps.commit.outputs.timestamp }}" \
+            --build-arg BUILD_TIMESTAMP="${ TIMESTAMP }" \
             --build-arg VCS_REF="${{ github.sha }}" \
             --build-arg VCS_URL="${{ github.server_url }}/${{ github.repository }}" \
-            --digestfile=artifacts/digest.txt \
+            --compression-format=zstd \
+            --compression-level=20 \
+            --file ./Containerfile \
+            --platform ${{ matrix.platform }} \
             --squash \
-            -f ./Containerfile \
-            -t $IMAGE \
+            --tag ${ IMAGE } \
+            --timestamp $(date -d "${ TIMESTAMP }" +%s) \
             .
-          echo "image=$IMAGE" >> $GITHUB_OUTPUT
+
+      - name: Push image
+        run: |
+          IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}-${{ matrix.arch }}
+          podman push ${ IMAGE } \
+            --digestfile artifacts/digest.txt
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v6
@@ -70,13 +78,6 @@ jobs:
           path: artifacts
           retention-days: 1
 
-      - name: Push image
-        run: |
-          DIGEST=`cat artifacts/digest.txt`
-          IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${DIGEST}
-          echo "Pushing ${IMAGE}
-          podman push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${ DIGEST }
-          # podman push ${{ steps.build.outputs.image }}
 
   merge:
     runs-on: ubuntu-24.04
