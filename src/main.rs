@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand};
 
 mod coverage;
@@ -38,15 +38,8 @@ enum Commands {
 fn main() -> Result<()> {
     let args = Cli::parse();
     match &args.command {
-        Some(Commands::ImportAtp { input, output }) => {
-            import_atp(input, output)?;
-        }
-        Some(Commands::BuildCoverage { places, output }) => {
-            build_coverage(places, output)?;
-        }
-        None => {
-            eprintln!("no subcommand given");
-        }
+        Some(Commands::ImportAtp { input, output }) => import_atp(input, output),
+        Some(Commands::BuildCoverage { places, output }) => build_coverage(places, output),
+        None => Err(anyhow!("no subcommand given")),
     }
-    Ok(())
 }
