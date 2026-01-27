@@ -35,6 +35,14 @@ fn test_pipeline() -> Result<()> {
 }
 
 #[test]
+fn test_no_subcommand() {
+    Command::new(cargo_bin!("diffed-places"))
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no subcommand given"));
+}
+
+#[test]
 fn test_import_atp_bad_input_path() -> Result<()> {
     let output = NamedTempFile::new()?;
     Command::new(cargo_bin!("diffed-places"))
