@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand};
 
-use diffed_places::{coverage::build_coverage, import_atp::import_atp, import_osm::import_osm};
+use diffed_places::{build_coverage, import_atp, import_osm};
 
 #[derive(Parser)]
 #[command(name = "diffed-places")]
