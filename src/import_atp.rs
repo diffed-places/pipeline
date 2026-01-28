@@ -54,14 +54,14 @@ fn process_zip(path: &Path, channel: SyncSender<Place>) -> Result<()> {
     archive.entries().par_iter().try_for_each(|entry| {
         if entry.size > 0 {
             let reader = archive.read(entry)?;
-            process_geojson(reader, channel.clone())?;
+            process_geojson(reader, Some(channel.clone()))?;
         }
         Ok(())
     })?;
     Ok(())
 }
 
-fn process_geojson<T: Read>(reader: T, channel: SyncSender<Place>) -> Result<()> {
+fn process_geojson<T: Read>(reader: T, channel: Option<SyncSender<Place>>) -> Result<()> {
     let buffer = BufReader::new(reader);
     for line in buffer.lines() {
         let line = line?;
@@ -89,7 +89,9 @@ fn process_geojson<T: Read>(reader: T, channel: SyncSender<Place>) -> Result<()>
         let Some(place) = make_place(trimmed) else {
             continue;
         };
-        channel.send(place)?;
+        if let Some(ref channel) = channel {
+            channel.send(place)?;
+        };
     }
     Ok(())
 }
@@ -288,5 +290,22 @@ mod tests {
             tags(&place),
             [("bicycle_road", "yes"), ("highway", "residential"),]
         );
+    }
+}
+
+#[cfg(any(test, fuzzing))]
+pub mod fuzz {
+    use super::process_geojson;
+    use std::io::Cursor;
+
+    pub fn fuzz_process_geojson(data: &[u8]) {
+        _ = process_geojson(Cursor::new(data), None);
+    }
+
+    #[test]
+    fn test_fuzz_process_geojson() {
+        // Make sure we don’t crash. The actual fuzzing is performed
+        // by `cargo fuzz`, not when running unit tests.
+        fuzz_process_geojson(b"foo");
     }
 }
