@@ -1,4 +1,5 @@
 use anyhow::{Context, Ok, Result, anyhow};
+use osm_pbf_iter::{Blob, Primitive, PrimitiveBlock};
 use protobuf_iter::MessageIter;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -12,6 +13,12 @@ pub fn import_osm(pbf: &Path, coverage: &Path, _output: &Path) -> Result<()> {
     let mut reader = BlobReader::try_new(&mut file).with_context(pbf_error)?;
     let _coverage = Coverage::load(coverage)
         .with_context(|| format!("could not open coverage file `{:?}`", coverage))?;
+
+    let (ways_start, relations_start) = reader.partition()?;
+    println!(
+        "ways_start={:?} relations_start={:?}",
+        ways_start, relations_start
+    );
 
     // TODO: Use a thread pool for decompression and decoding.
     if reader.num_blobs() > 0 {
@@ -75,6 +82,63 @@ impl<'a, R: Read + Seek> BlobReader<'a, R> {
         Ok(buf)
     }
 
+    /// Finds the first blob with ways, and the first blob with relations.
+    pub fn partition(&mut self) -> Result<(usize, usize)> {
+        let ways = {
+            let mut left = 0;
+            let mut right = self.blobs.len();
+            while left < right {
+                let mid = left + (right - left) / 2;
+                let blob = self.read_blob(mid)?;
+                if Self::classify(&blob)? < 2 {
+                    left = mid + 1;
+                } else {
+                    right = mid;
+                }
+            }
+            left
+        };
+
+        let relations = {
+            let mut left = ways;
+            let mut right = self.blobs.len();
+            while left < right {
+                let mid = left + (right - left) / 2;
+                let blob = self.read_blob(mid)?;
+                if Self::classify(&blob)? < 3 {
+                    left = mid + 1;
+                } else {
+                    right = mid;
+                }
+            }
+            left
+        };
+
+        Ok((ways, relations))
+    }
+
+    /// Internal helper for partition().
+    fn classify(blob: &[u8]) -> Result<u8> {
+        for m in MessageIter::new(blob) {
+            let block = match m.tag {
+                1 => Some(Blob::Raw(Vec::from(m.value.get_data()))),
+                3 => Some(Blob::Zlib(Vec::from(m.value.get_data()))),
+                _ => None,
+            };
+            if let Some(block) = block {
+                let data = block.into_data();
+                let block = PrimitiveBlock::parse(&data);
+                return match block.primitives().next() {
+                    Some(Primitive::Node(_)) => Ok(1),
+                    Some(Primitive::Way(_)) => Ok(2),
+                    Some(Primitive::Relation(_)) => Ok(3),
+                    None => Err(anyhow!("empty blob")),
+                };
+            };
+        }
+        Err(anyhow!("unknown blob content"))
+    }
+
     fn read_blob_header<T: Read>(reader: &mut T) -> Result<Vec<u8>> {
         let header_len = {
             let mut header_len_buf = [0; 4];
@@ -112,6 +176,7 @@ mod tests {
         let mut reader = BlobReader::try_new(&mut file)?;
         assert_eq!(reader.blobs, &[(119, 16681), (16816, 15278), (32110, 8616)]);
         assert_eq!(reader.num_blobs(), 3);
+        assert_eq!(reader.partition()?, (1, 2));
         let blob = reader.read_blob(2)?;
         assert_eq!(blob.len(), 8616);
         assert_eq!(blob[1234], 121);
@@ -119,7 +184,13 @@ mod tests {
     }
 
     #[test]
-    fn test_blob_index_bad_data() {
+    fn test_blob_reader_classify_err() {
+        assert!(BlobReader::<File>::classify(b"").is_err());
+        assert!(BlobReader::<File>::classify(&[8]).is_err());
+    }
+
+    #[test]
+    fn test_blob_reader_bad_data() {
         assert!(BlobReader::try_new(&mut Cursor::new(b"")).is_err());
         assert!(BlobReader::try_new(&mut Cursor::new(b"\0\0\0")).is_err());
         assert!(BlobReader::try_new(&mut Cursor::new(b"\0\0\0\0")).is_err());
