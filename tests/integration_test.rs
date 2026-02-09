@@ -11,12 +11,12 @@ fn test_pipeline() -> Result<()> {
     let workdir = TempDir::new()?;
 
     let mut atp = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    atp.push("tests/test_data/alltheplaces.parquet");
-    symlink(&atp, workdir.path().join("alltheplaces.parquet"))?;
+    atp.push("tests/test_data/alltheplaces.zip");
+    symlink(&atp, workdir.path().join("alltheplaces.zip"))?;
 
     let mut osm = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     osm.push("tests/test_data/zugerland.osm.pbf");
-    symlink(&osm, workdir.path().join("osm.pbf"))?;
+    symlink(&osm, workdir.path().join("openstreetmap.pbf"))?;
 
     Command::new(cargo_bin!("diffed-places"))
         .arg("run")
