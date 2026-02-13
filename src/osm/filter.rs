@@ -24,6 +24,8 @@ struct Relation {
     _id: u64,
 }
 
+// TODO: Handle recursive relations.
+// https://github.com/diffed-places/pipeline/issues/141
 pub fn filter_relations<R: Read + Seek + Send>(
     reader: &mut BlobReader<R>,
     blobs: (usize, usize),

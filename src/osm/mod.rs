@@ -4,17 +4,16 @@ use osm_pbf_iter::{Blob, Primitive, PrimitiveBlock, RelationMemberType};
 use protobuf_iter::MessageIter;
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
-use std::fs::{File, rename};
+use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::mpsc::{SyncSender, sync_channel};
 use std::thread;
 
 use crate::PROGRESS_BAR_STYLE;
 use crate::coverage::Coverage;
-use crate::u64_table::U64Table;
 
+mod cover;
 mod filter;
 
 pub fn import_osm(
@@ -42,10 +41,10 @@ pub fn import_osm(
     let relation_parents = build_relation_parents(&mut reader, rel_blobs, progress)?;
 
     // Find which nodes, ways and relations lie within the coverage.
-    let covered_nodes = build_covered_nodes(&mut reader, node_blobs, &coverage, progress, workdir)?;
+    let covered_nodes = cover::cover_nodes(&mut reader, node_blobs, &coverage, progress, workdir)?;
     let covered_ways =
-        build_covered_ways(&mut reader, way_blobs, &covered_nodes, progress, workdir)?;
-    let covered_relations = build_covered_relations(
+        cover::cover_ways(&mut reader, way_blobs, &covered_nodes, progress, workdir)?;
+    let covered_relations = cover::cover_relations(
         &mut reader,
         rel_blobs,
         &covered_nodes,
@@ -166,293 +165,6 @@ fn build_relation_parents<R: Read + Seek + Send>(
 
     progress_bar.finish_with_message(format!("blobs → {} relation parents", result.len()));
     Ok(result)
-}
-
-fn build_covered_nodes<R: Read + Seek + Send>(
-    reader: &mut BlobReader<R>,
-    blobs: (usize, usize),
-    coverage: &Coverage,
-    progress: &MultiProgress,
-    workdir: &Path,
-) -> Result<U64Table> {
-    let num_blobs = blobs.1 - blobs.0;
-    let bar = Arc::new(progress.add(ProgressBar::new(num_blobs as u64)));
-    bar.set_style(ProgressStyle::with_template(PROGRESS_BAR_STYLE)?);
-    bar.set_prefix("osm.cov.n");
-    bar.set_message("blobs");
-
-    let out = workdir.join("covered-nodes");
-    if !out.exists() {
-        log::info!("import_osm::build_covered_nodes is starting");
-    } else {
-        log::info!(
-            "skipping import_osm::build_covered_nodes, already found {:?}",
-            out
-        );
-        return Ok(U64Table::open(&out)?);
-    }
-
-    let mut tmp = out.clone();
-    tmp.add_extension("tmp");
-
-    let mut num_covered_nodes = 0;
-    thread::scope(|s| {
-        let num_workers = usize::from(thread::available_parallelism()?);
-        let (blob_tx, blob_rx) = sync_channel::<Blob>(num_workers);
-        let (node_tx, node_rx) = sync_channel::<u64>(num_workers * 1024);
-
-        // I/O-bound thread for reading blobs from local disk.
-        let bar_clone = Arc::clone(&bar);
-        let reader_thread = s.spawn(move || {
-            for i in blobs.0..blobs.1 {
-                let blob = reader.read_blob(i)?;
-                blob_tx.send(blob)?;
-                bar_clone.inc(1);
-            }
-            Ok(())
-        });
-
-        // CPU-bound thread that decompresses and handles blobs.
-        // Maintains an internal thread pool via `rayon::par_bridge`.
-        let handler_thread = s.spawn(move || {
-            blob_rx.into_iter().par_bridge().try_for_each(|blob| {
-                let node_tx = node_tx.clone();
-                let data = blob.into_data(); // decompress
-                let block = PrimitiveBlock::parse(&data);
-                for primitive in block.primitives() {
-                    if let Primitive::Node(node) = primitive {
-                        let s2_lat_lng = s2::latlng::LatLng::from_degrees(node.lat, node.lon);
-                        let cell_id = s2::cellid::CellID::from(s2_lat_lng);
-                        if coverage.contains_s2_cell(&cell_id) {
-                            node_tx.send(node.id)?;
-                        }
-                    }
-                }
-                Ok(())
-            })?;
-            Ok(())
-        });
-
-        // Thread to sort node ids and write the table to the working directory.
-        let writer_thread = s.spawn(|| {
-            num_covered_nodes = crate::u64_table::create(node_rx, workdir, &tmp)?;
-            Ok(())
-        });
-        reader_thread
-            .join()
-            .expect("reader panic")
-            .and(handler_thread.join().expect("handler panic"))
-            .and(writer_thread.join().expect("writer panic"))
-    })?;
-
-    rename(&tmp, &out)?;
-    bar.finish_with_message(format!("blobs → {} nodes", num_covered_nodes));
-
-    Ok(U64Table::open(&out)?)
-}
-
-fn build_covered_ways<R: Read + Seek + Send>(
-    reader: &mut BlobReader<R>,
-    blobs: (usize, usize),
-    covered_nodes: &U64Table,
-    progress: &MultiProgress,
-    workdir: &Path,
-) -> Result<U64Table> {
-    let out = workdir.join("covered-ways");
-    if !out.exists() {
-        log::info!("import_osm::build_covered_ways is starting");
-    } else {
-        log::info!(
-            "skipping import_osm::build_covered_ways, already found {:?}",
-            out
-        );
-        return Ok(U64Table::open(&out)?);
-    }
-
-    let num_blobs = blobs.1 - blobs.0;
-    let bar = Arc::new(progress.add(ProgressBar::new(num_blobs as u64)));
-    bar.set_style(ProgressStyle::with_template(PROGRESS_BAR_STYLE)?);
-    bar.set_prefix("osm.cov.w");
-    bar.set_message("blobs");
-
-    let mut tmp = out.clone();
-    tmp.add_extension("tmp");
-
-    let num_workers = usize::from(thread::available_parallelism()?);
-    let mut num_covered_ways = 0;
-    thread::scope(|s| {
-        let (blob_tx, blob_rx) = sync_channel::<Blob>(num_workers);
-        let (way_tx, way_rx) = sync_channel::<u64>(num_workers * 1024);
-
-        // I/O-bound thread for reading blobs from local disk.
-        let bar_clone = Arc::clone(&bar);
-        let reader_thread = s.spawn(move || {
-            for i in blobs.0..blobs.1 {
-                let blob = reader.read_blob(i)?;
-                blob_tx.send(blob)?;
-                bar_clone.inc(1);
-            }
-            Ok(())
-        });
-
-        // CPU-bound blob consumers (one for each CPU) concurrently
-        // read and decompress blobs.  For each way that has at least one node
-        // within the spatial coverage area, the way ID is sent to the way
-        // consumer thread.
-        let handler_thread = s.spawn(move || {
-            blob_rx.into_iter().par_bridge().try_for_each(|blob| {
-                let data = blob.into_data(); // decompress
-                let block = PrimitiveBlock::parse(&data);
-                for primitive in block.primitives() {
-                    if let Primitive::Way(way) = primitive {
-                        let mut is_covered = false;
-                        for node in way.refs() {
-                            if node >= 0 && covered_nodes.contains(node as u64) {
-                                is_covered = true;
-                                break;
-                            }
-                        }
-                        if is_covered {
-                            way_tx.send(way.id)?;
-                        }
-                    }
-                }
-                Ok(())
-            })?;
-            Ok(())
-        });
-
-        // Thread to sort way ids and write the resulting table to the working directory.
-        let writer_thread = s.spawn(|| {
-            num_covered_ways = crate::u64_table::create(way_rx, workdir, &tmp)?;
-            Ok(())
-        });
-
-        reader_thread
-            .join()
-            .expect("reader panic")
-            .and(handler_thread.join().expect("handler panic"))
-            .and(writer_thread.join().expect("writer panic"))
-    })?;
-
-    rename(&tmp, &out)?;
-    bar.finish_with_message(format!("blobs → {} ways", num_covered_ways));
-    Ok(U64Table::open(&out)?)
-}
-
-fn build_covered_relations<R: Read + Seek + Send>(
-    reader: &mut BlobReader<R>,
-    blobs: (usize, usize),
-    covered_nodes: &U64Table,
-    covered_ways: &U64Table,
-    relation_parents: &HashMap<u64, u64>,
-    progress: &MultiProgress,
-    workdir: &Path,
-) -> Result<U64Table> {
-    let out = workdir.join("covered-relations");
-    if !out.exists() {
-        log::info!("import_osm::build_covered_relations is starting");
-    } else {
-        log::info!(
-            "skipping import_osm::build_covered_relations, already found {:?}",
-            out
-        );
-        return Ok(U64Table::open(&out)?);
-    }
-
-    let mut tmp = out.clone();
-    tmp.add_extension("tmp");
-
-    let num_blobs = blobs.1 - blobs.0;
-    let bar = Arc::new(progress.add(ProgressBar::new(num_blobs as u64)));
-    bar.set_style(ProgressStyle::with_template(PROGRESS_BAR_STYLE)?);
-    bar.set_prefix("osm.cov.r");
-    bar.set_message("blobs");
-
-    let num_workers = usize::from(thread::available_parallelism()?);
-    let mut num_relations = 0;
-    thread::scope(|s| {
-        let (blob_tx, blob_rx) = sync_channel::<Blob>(num_workers);
-        let (rel_tx, rel_rx) = sync_channel::<u64>(num_workers * 1024);
-
-        // I/O-bound thread for reading blobs from local disk.
-        let bar_clone = Arc::clone(&bar);
-        let reader_thread = s.spawn(move || {
-            for i in blobs.0..blobs.1 {
-                let blob = reader.read_blob(i)?;
-                blob_tx.send(blob)?;
-                bar_clone.inc(1);
-            }
-            Ok(())
-        });
-
-        // CPU-bound blob consumers (one for each CPU) concurrently
-        // read and decompress blobs.  For each relation that has at
-        // least one node or way within the spatial coverage area, the
-        // relation ID is sent to the relation consumer thread.
-        let handler_thread = s.spawn(move || {
-            blob_rx.into_iter().par_bridge().try_for_each(|blob| {
-                let data = blob.into_data(); // decompress
-                let block = PrimitiveBlock::parse(&data);
-                for primitive in block.primitives() {
-                    if let Primitive::Relation(rel) = primitive {
-                        let mut is_covered = false;
-                        for (_, member_id, member_type) in rel.members() {
-                            match member_type {
-                                RelationMemberType::Node => {
-                                    if covered_nodes.contains(member_id) {
-                                        is_covered = true;
-                                        break;
-                                    }
-                                }
-                                RelationMemberType::Way => {
-                                    if covered_ways.contains(member_id) {
-                                        is_covered = true;
-                                        break;
-                                    }
-                                }
-                                RelationMemberType::Relation => {}
-                            }
-                        }
-                        if is_covered {
-                            // If relation R is geographically within our coverage area,
-                            // so are its parents, grandparents, and any further ancestors.
-                            // In theory, the OpenStreetMap relation graph should be acyclic,
-                            // but in practice such cycles do occur. We break cycles while
-                            // walking the parent chain, so we don’t enter an infinite loop.
-                            //
-                            // With a coverage area derived from AllThePlaces as of 2026-01-03
-                            // and the OpenStreetMap planet dump of 2026-01-19, walking the
-                            // parent chain increases the yield of relations from 1947 to 2198.
-                            // Even though this is only a small quantitative difference,
-                            // we need to do this for correctness.
-                            for id in relation_parents.parent_chain(rel.id) {
-                                rel_tx.send(id)?;
-                            }
-                        }
-                    }
-                }
-                Ok(())
-            })?;
-            Ok(())
-        });
-
-        // Thread to sort way ids and write the resulting table to the working directory.
-        let writer_thread = s.spawn(|| {
-            num_relations = crate::u64_table::create(rel_rx, workdir, &tmp)?;
-            Ok(())
-        });
-
-        reader_thread
-            .join()
-            .expect("reader panic")
-            .and(handler_thread.join().expect("handler panic"))
-            .and(writer_thread.join().expect("writer panic"))
-    })?;
-
-    rename(&tmp, &out)?;
-    bar.finish_with_message(format!("blobs → {} relations", num_relations));
-    Ok(U64Table::open(&out)?)
 }
 
 /// Reads data blobs from OpenStreetMap PBF files.
