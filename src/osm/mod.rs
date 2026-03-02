@@ -6,13 +6,14 @@ use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{SyncSender, sync_channel};
 use std::thread;
 
 use crate::PROGRESS_BAR_STYLE;
 use crate::coverage::Coverage;
 
+mod assemble;
 mod coords;
 mod cover;
 mod filter;
@@ -22,8 +23,13 @@ pub fn import_osm(
     coverage: &Path,
     progress: &MultiProgress,
     workdir: &Path,
-) -> Result<()> {
+) -> Result<PathBuf> {
     assert!(workdir.exists());
+
+    let out_path = workdir.join("osm.parquet");
+    if out_path.exists() {
+        return Ok(out_path);
+    }
 
     let pbf_error = || format!("could not open file `{:?}`", pbf);
     let mut file = File::open(pbf).with_context(pbf_error)?;
@@ -74,7 +80,7 @@ pub fn import_osm(
         workdir,
     )?;
 
-    let _filtered_nodes = filter::filter_nodes(
+    let filtered_nodes = filter::filter_nodes(
         &mut reader,
         node_blobs,
         &coverage,
@@ -85,7 +91,16 @@ pub fn import_osm(
         workdir,
     )?;
 
-    Ok(())
+    assemble::assemble(
+        &filtered_nodes,
+        &filtered_ways,
+        &filtered_relations,
+        progress,
+        workdir,
+        &out_path,
+    )?;
+
+    Ok(out_path)
 }
 
 fn make_progress_bar(
