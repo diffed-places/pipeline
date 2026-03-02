@@ -15,22 +15,22 @@ use std::thread;
 use filtered_file::FilteredFile;
 
 #[derive(Deserialize, Serialize)]
-struct Node {
-    id: u64,
-    tags: Vec<String>,
-    lon_e7: i32,
-    lat_e7: i32,
+pub struct Node {
+    pub id: u64,
+    pub tags: Vec<String>,
+    pub lon_e7: i32,
+    pub lat_e7: i32,
 }
 
 #[derive(Deserialize, Serialize)]
-struct Way {
-    id: u64,
-    nodes: Vec<u64>,
-    tags: Vec<String>,
+pub struct Way {
+    pub id: u64,
+    pub nodes: Vec<u64>,
+    pub tags: Vec<String>,
 }
 
 #[derive(Deserialize, Serialize)]
-struct Relation {
+pub struct Relation {
     id: u64,
     tags: Vec<String>,
 }
@@ -517,7 +517,7 @@ where
     false
 }
 
-mod filtered_file {
+pub mod filtered_file {
     use anyhow::{Ok, Result, anyhow};
     use geo::Point;
     use memmap2::Mmap;
@@ -719,6 +719,24 @@ mod filtered_file {
             } else {
                 None
             }
+        }
+
+        pub fn feature_count(&self) -> usize {
+            self.feature_offsets.len()
+        }
+
+        pub fn feature_data(&self, index: usize) -> Option<&[u8]> {
+            let num_features = self.feature_offsets.len();
+            if index >= num_features {
+                return None;
+            }
+            let start: usize = self.feature_offsets[index].try_into().ok()?;
+            let limit: usize = if index + 1 < num_features {
+                self.feature_offsets[index + 1].try_into().ok()?
+            } else {
+                self.feature_data.len()
+            };
+            Some(&self.feature_data[start..limit])
         }
 
         #[allow(unused)] // TODO: Remove attribute once we use this in production code.
@@ -980,7 +998,28 @@ mod filtered_file {
         }
 
         #[test]
-        fn test_index() -> Result<()> {
+        fn test_features() -> Result<()> {
+            let tmp = tempfile::NamedTempFile::new()?;
+            let mut writer = Writer::create(tmp.path())?;
+            writer.write_features(
+                &test_data_path("u64_le_11_23_7"),
+                &test_data_path("u64_le_0_2_7"),
+            )?;
+            writer.close()?;
+            let ff = FilteredFile::open(tmp.path())?;
+            assert_eq!(ff.feature_count(), 3);
+            assert_eq!(*ff.feature_data(0).unwrap(), [11, 0]);
+            assert_eq!(*ff.feature_data(1).unwrap(), [0, 0, 0, 0, 0]);
+            assert_eq!(
+                *ff.feature_data(2).unwrap(),
+                [0, 23, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0]
+            );
+            assert_eq!(ff.feature_data(3), None);
+            Ok(())
+        }
+
+        #[test]
+        fn test_feature_index() -> Result<()> {
             let tmp = tempfile::NamedTempFile::new()?;
             let mut writer = Writer::create(tmp.path())?;
             writer.write_feature_index(
@@ -1037,6 +1076,8 @@ mod filtered_file {
             let ff = FilteredFile::open(tmp.path())?;
             assert_eq!(ff.feature_index(7), None);
             assert_eq!(ff.get_coords(5), None);
+            assert_eq!(ff.feature_count(), 0);
+            assert_eq!(ff.feature_data(17123), None);
             assert_eq!(ff.has_node_ref(123), false);
             assert_eq!(ff.has_way_ref(789), false);
             Ok(())
