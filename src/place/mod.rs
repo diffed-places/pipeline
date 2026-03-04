@@ -1,5 +1,5 @@
 use deepsize::DeepSizeOf;
-use geo::Point;
+use geo::Coord;
 use serde::{Deserialize, Serialize};
 
 mod writer;
@@ -8,13 +8,14 @@ pub use writer::ParquetWriter;
 #[derive(Debug, DeepSizeOf, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub struct Place {
     pub s2_cell_id: u64,
+    pub osm_id: u64,
     pub source: String,
     pub tags: Vec<(String, String)>,
 }
 
 impl Place {
-    pub fn new(point: &Point, source: String, tags: Vec<(String, String)>) -> Option<Place> {
-        let s2_lat_lng = s2::latlng::LatLng::from_degrees(point.y(), point.x());
+    pub fn new(coord: &Coord, source: String, tags: Vec<(String, String)>) -> Option<Place> {
+        let s2_lat_lng = s2::latlng::LatLng::from_degrees(coord.y, coord.x);
         if !s2_lat_lng.is_valid() {
             return None;
         }
@@ -22,6 +23,7 @@ impl Place {
         let s2_cell_id = s2::cellid::CellID::from(s2_lat_lng).0;
         Some(Place {
             s2_cell_id,
+            osm_id: 0,
             source,
             tags,
         })
@@ -31,11 +33,14 @@ impl Place {
 #[cfg(test)]
 mod tests {
     use super::Place;
-    use geo::Point;
+    use geo::Coord;
 
     #[test]
     fn test_new() {
-        let p = Point::new(7.447_812_3, 46.947_980_1);
+        let p = Coord {
+            x: 7.447_812_3,
+            y: 46.947_980_1,
+        };
         let source = "test/source".to_string();
         let tags = vec![
             ("building".to_string(), "tower".to_string()),
@@ -50,13 +55,19 @@ mod tests {
     #[test]
     fn test_cmp() {
         let a = Place::new(
-            &Point::new(7.4478123, 46.9479801),
+            &Coord {
+                x: 7.4478123,
+                y: 46.9479801,
+            },
             "test/source".to_string(),
             vec![],
         )
         .unwrap();
         let b = Place::new(
-            &Point::new(-122.4630042, 37.8045878),
+            &Coord {
+                x: -122.4630042,
+                y: 37.8045878,
+            },
             "test/source".to_string(),
             vec![],
         )

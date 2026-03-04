@@ -48,7 +48,8 @@ fn process_places(
     let mut tmp = PathBuf::from(out);
     tmp.add_extension("tmp");
 
-    let mut writer = ParquetWriter::try_new(/* batch size */ 64 * 1024, &tmp)?;
+    let mut writer =
+        ParquetWriter::try_new(/* batch size */ 64 * 1024, /* osm */ false, &tmp)?;
     let sorter: ExternalSorter<Place, std::io::Error, MemoryLimitedBufferBuilder> =
         ExternalSorterBuilder::new()
             .with_tmp_dir(workdir)
@@ -143,7 +144,7 @@ fn process_geojson<T: Read>(reader: T, channel: Option<SyncSender<Place>>) -> Re
 
 fn make_place(geojson: &str) -> Option<Place> {
     let parsed = geojson.parse::<GeoJson>().ok()?;
-    let point = find_point(&parsed)?;
+    let coord = find_point(&parsed)?.0;
     let GeoJson::Feature(feature) = parsed else {
         return None;
     };
@@ -188,7 +189,7 @@ fn make_place(geojson: &str) -> Option<Place> {
 
         tags.push((key, value));
     }
-    Place::new(&point, source?, tags)
+    Place::new(&coord, source?, tags)
 }
 
 /// Finds a representative point for a GeoJson feature.

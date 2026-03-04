@@ -2,6 +2,7 @@ use super::filter::{Node, Way, filtered_file::FilteredFile};
 use super::make_progress_bar;
 use anyhow::{Ok, Result};
 use ext_sort::{ExternalSorter, ExternalSorterBuilder, buffer::mem::MemoryLimitedBufferBuilder};
+use geo::{Centroid, Coord, LineString};
 use indicatif::{MultiProgress, ProgressBar};
 use rayon::prelude::*;
 use rmp_serde::Deserializer;
@@ -60,20 +61,23 @@ fn assemble_nodes(
             if let Some(data) = nodes.feature_data(i) {
                 let mut d = Deserializer::new(Cursor::new(data));
                 if let std::result::Result::Ok(node) = Node::deserialize(&mut d) {
-                    let point =
-                        geo::Point::new(node.lon_e7 as f64 * 1e-7, node.lat_e7 as f64 * 1e-7);
-                    let source = String::from("osm/nodes");
+                    let coord = Coord {
+                        x: node.lon_e7 as f64 * 1e-7,
+                        y: node.lat_e7 as f64 * 1e-7,
+                    };
+                    let source = String::from("n");
                     let tags = node
                         .tags
                         .chunks_exact(2)
                         .map(|c| (c[0].clone(), c[1].clone()))
                         .collect();
-                    if let Some(place) = Place::new(&point, source, tags) {
+                    if let Some(mut place) = Place::new(&coord, source, tags) {
+                        place.osm_id = node.id;
                         out.send(place)?;
-                        progress_bar.inc(1);
                     }
                 };
             };
+            progress_bar.inc(1);
             Ok(())
         })
 }
@@ -82,33 +86,45 @@ fn assemble_ways(
     nodes: &FilteredFile,
     ways: &FilteredFile,
     progress_bar: &ProgressBar,
-    _out: SyncSender<Place>,
+    out: SyncSender<Place>,
 ) -> Result<()> {
     (0..ways.feature_count())
         .into_par_iter()
         .try_for_each(|i| {
             if let Some(data) = ways.feature_data(i) {
                 let mut d = Deserializer::new(Cursor::new(data));
-                if let std::result::Result::Ok(way) = Way::deserialize(&mut d) {
-                    let mut coords = Vec::<geo::Point>::with_capacity(way.nodes.len());
+                if let std::result::Result::Ok(way) = Way::deserialize(&mut d)
+                    && !way.tags.is_empty()
+                {
+                    let mut coords = Vec::<geo::Coord>::with_capacity(way.nodes.len());
                     for node_id in way.nodes.iter() {
-                        if let Some(c) = nodes.get_coords(*node_id) {
+                        if let Some(c) = nodes.get_coord(*node_id) {
                             coords.push(c);
                         }
                     }
-                    if coords.len() != way.nodes.len() {
-                        println!(
-                            "*** Missing nodes in way/{:?}, only got {:?} of {:?}, {:?}",
-                            way.id,
-                            coords.len(),
-                            way.nodes.len(),
-                            way.nodes
-                        );
+
+                    // In theory, OpenStreetMap ways can self-intersect.
+                    // In practice, this is super rare and checked by
+                    // QA tools such as Osmose. So, we don’t really care
+                    // as long as the pipeline doesn’t crash. If this ever
+                    // becomes a real problem, we could use the geos crate.
+                    let linestring = LineString::new(coords);
+                    if let Some(centroid) = linestring.centroid() {
+                        let tags: Vec<(String, String)> = way
+                            .tags
+                            .chunks_exact(2)
+                            .map(|c| (c[0].clone(), c[1].clone()))
+                            .collect();
+                        let source = String::from("w");
+                        if let Some(mut place) = Place::new(&centroid.0, source, tags) {
+                            place.osm_id = way.id;
+                            out.send(place)?;
+                        }
                     }
-                    progress_bar.inc(1);
-                    // TODO: Implement.
                 }
             }
+
+            progress_bar.inc(1);
             Ok(())
         })?;
     Ok(())
@@ -123,7 +139,8 @@ fn write_places(
     let mut tmp = PathBuf::from(out);
     tmp.add_extension("tmp");
 
-    let mut writer = ParquetWriter::try_new(/* batch size */ 64 * 1024, &tmp)?;
+    let mut writer =
+        ParquetWriter::try_new(/* batch size */ 64 * 1024, /* osm */ true, &tmp)?;
     let sorter: ExternalSorter<Place, std::io::Error, MemoryLimitedBufferBuilder> =
         ExternalSorterBuilder::new()
             .with_tmp_dir(workdir)
