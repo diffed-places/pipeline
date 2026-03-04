@@ -1,7 +1,7 @@
 use super::Place;
 use anyhow::{Ok, Result};
 use arrow::{
-    array::{ArrayRef, MapArray, StringArray, StructArray, UInt64Array},
+    array::{ArrayRef, MapArray, StringArray, StructArray, UInt8Array, UInt64Array},
     buffer::OffsetBuffer,
     datatypes::{DataType, Field, Schema},
     record_batch::RecordBatch,
@@ -11,11 +11,13 @@ use parquet::{
     basic::{Compression, ZstdLevel},
     file::properties::WriterProperties,
 };
+use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 
 pub struct ParquetWriter {
+    osm: bool,
     schema: Arc<Schema>,
     writer: ArrowWriter<File>,
     places: Vec<Place>,
@@ -23,15 +25,16 @@ pub struct ParquetWriter {
 }
 
 impl ParquetWriter {
-    pub fn try_new(batch_size: usize, out: &Path) -> Result<ParquetWriter> {
+    pub fn try_new(batch_size: usize, osm: bool, out: &Path) -> Result<ParquetWriter> {
         assert!(batch_size > 0);
         let file = File::create(out)?;
-        let schema = Arc::new(make_schema());
+        let schema = Arc::new(make_schema(osm));
         let props = WriterProperties::builder()
             .set_compression(Compression::ZSTD(ZstdLevel::try_new(15)?))
             .build();
         let writer = ArrowWriter::try_new(file, schema.clone(), Some(props))?;
         Ok(ParquetWriter {
+            osm,
             schema,
             writer,
             places: Vec::with_capacity(batch_size),
@@ -55,14 +58,33 @@ impl ParquetWriter {
     }
 
     fn flush(&mut self) -> Result<()> {
-        let s2_cell_ids = Arc::new(UInt64Array::from_iter(
+        let mut values = Vec::<Arc<dyn arrow::array::Array>>::with_capacity(5);
+        values.push(Arc::new(UInt64Array::from_iter(
             self.places.iter().map(|p| p.s2_cell_id),
-        ));
-        let sources = Arc::new(StringArray::from_iter_values(
-            self.places.iter().map(|p| p.source.as_str()),
-        ));
-        let tags = make_tags(&self.places, self.num_tags);
-        let batch = RecordBatch::try_new(self.schema.clone(), vec![s2_cell_ids, sources, tags])?;
+        )));
+        if self.osm {
+            values.push(Arc::new(StringArray::from_iter_values(
+                self.places.iter().map(|_| "osm"),
+            )));
+            values.push(Arc::new(UInt8Array::from_iter(self.places.iter().map(
+                |p| match p.source.as_ref() {
+                    "n" => 0_u8,
+                    "w" => 1_u8,
+                    "r" => 2_u8,
+                    _ => panic!("source must be \"n\", \"w\" or \"r\""),
+                },
+            ))));
+            values.push(Arc::new(UInt64Array::from_iter(
+                self.places.iter().map(|p| p.osm_id),
+            )));
+        } else {
+            values.push(Arc::new(StringArray::from_iter_values(
+                self.places.iter().map(|p| p.source.as_str()),
+            )));
+        }
+        values.push(make_tags(&self.places, self.num_tags));
+
+        let batch = RecordBatch::try_new(self.schema.clone(), values)?;
         self.writer.write(&batch)?;
         self.places.clear();
         self.num_tags = 0;
@@ -118,27 +140,43 @@ fn make_tags(places: &[Place], num_tags: usize) -> Arc<MapArray> {
     Arc::new(map_array)
 }
 
-fn make_schema() -> Schema {
-    Schema::new(vec![
+fn make_schema(osm: bool) -> Schema {
+    let mut fields = vec![
         Field::new("s2_cell_id", DataType::UInt64, /* nullable */ false),
         Field::new("source", DataType::Utf8, /* nullable */ false),
-        Field::new(
-            "tags",
-            DataType::Map(
-                Arc::new(Field::new(
-                    "key_value",
-                    DataType::Struct(
-                        vec![
-                            Field::new("key", DataType::Utf8, /* nullable */ false),
-                            Field::new("value", DataType::Utf8, /* nullable */ false),
-                        ]
-                        .into(),
-                    ),
-                    /* nullable */ false,
-                )),
-                /* sorted */ true,
-            ),
-            false, // non-nullable
+    ];
+    if osm {
+        let mut osm_type_metadata = HashMap::new();
+        osm_type_metadata.insert("ENUM_VALUES".to_string(), "node,way,relation".to_string());
+        osm_type_metadata.insert("ENUM_TYPE".to_string(), "u8".to_string());
+        fields.push(
+            Field::new("osm_type", DataType::UInt8, /* nullable */ false)
+                .with_metadata(osm_type_metadata),
+        );
+        fields.push(Field::new(
+            "osm_id",
+            DataType::UInt64,
+            /* nullable */ false,
+        ));
+    }
+    fields.push(Field::new(
+        "tags",
+        DataType::Map(
+            Arc::new(Field::new(
+                "key_value",
+                DataType::Struct(
+                    vec![
+                        Field::new("key", DataType::Utf8, /* nullable */ false),
+                        Field::new("value", DataType::Utf8, /* nullable */ false),
+                    ]
+                    .into(),
+                ),
+                /* nullable */ false,
+            )),
+            /* sorted */ true,
         ),
-    ])
+        false, // non-nullable
+    ));
+
+    Schema::new(fields)
 }

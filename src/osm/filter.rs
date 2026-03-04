@@ -519,7 +519,7 @@ where
 
 pub mod filtered_file {
     use anyhow::{Ok, Result, anyhow};
-    use geo::Point;
+    use geo::Coord;
     use memmap2::Mmap;
     use std::fs::File;
     use std::io::{BufReader, BufWriter, Seek, SeekFrom, Write};
@@ -535,19 +535,15 @@ pub mod filtered_file {
         _mmap: Mmap,
 
         /// Present in all filtered files (for nodes, ways and relations).
-        #[allow(unused)] // TODO: Remove attribute once we use the features.
         feature_data: &'a [u8],
 
         /// Present in all filtered files (for nodes, ways and relations).
-        #[allow(unused)] // TODO: Remove attribute once we use the features.
         feature_offsets: &'a [u64],
 
         /// Present in `osm-filtered-nodes`.
-        #[allow(unused)] // TODO: Remove attribute once we use the coordinates.
         coord_keys: &'a [u64],
 
         /// Present in `osm-filtered-nodes`.
-        #[allow(unused)] // TODO: Remove attribute once we use the coordinates.
         coord_data: &'a [i32],
 
         /// Present in `osm-filtered-ways` and `osm-filtered-relations`.
@@ -704,8 +700,7 @@ pub mod filtered_file {
             })
         }
 
-        #[allow(unused)] // TODO: Remove attribute once we use the coordinates.
-        pub fn get_coords(&self, node_id: u64) -> Option<Point> {
+        pub fn get_coord(&self, node_id: u64) -> Option<Coord> {
             let index = if cfg!(target_endian = "little") {
                 self.coord_keys.binary_search(&node_id)
             } else {
@@ -715,7 +710,7 @@ pub mod filtered_file {
             if let Result::Ok(i) = index {
                 let lon = self.coord_data[i * 2] as f64 / 1e7;
                 let lat = self.coord_data[i * 2 + 1] as f64 / 1e7;
-                Some(Point::new(lon, lat))
+                Some(Coord { x: lon, y: lat })
             } else {
                 None
             }
@@ -989,11 +984,29 @@ pub mod filtered_file {
             writer.write_coords(&keys_path, &data.path())?;
             writer.close()?;
             let ff = FilteredFile::open(tmp.path())?;
-            assert_eq!(ff.get_coords(0), Some(Point::new(0.0000001, 0.0000002)));
-            assert_eq!(ff.get_coords(1), None);
-            assert_eq!(ff.get_coords(2), Some(Point::new(0.0000003, 0.0000004)));
-            assert_eq!(ff.get_coords(7), Some(Point::new(0.0000005, 0.0000006)));
-            assert_eq!(ff.get_coords(99), None);
+            assert_eq!(
+                ff.get_coord(0).unwrap(),
+                Coord {
+                    x: 0.0000001,
+                    y: 0.0000002
+                }
+            );
+            assert_eq!(ff.get_coord(1), None);
+            assert_eq!(
+                ff.get_coord(2).unwrap(),
+                Coord {
+                    x: 0.0000003,
+                    y: 0.0000004
+                }
+            );
+            assert_eq!(
+                ff.get_coord(7).unwrap(),
+                Coord {
+                    x: 0.0000005,
+                    y: 0.0000006
+                }
+            );
+            assert_eq!(ff.get_coord(99), None);
             Ok(())
         }
 
@@ -1075,7 +1088,7 @@ pub mod filtered_file {
             writer.close()?;
             let ff = FilteredFile::open(tmp.path())?;
             assert_eq!(ff.feature_index(7), None);
-            assert_eq!(ff.get_coords(5), None);
+            assert_eq!(ff.get_coord(5), None);
             assert_eq!(ff.feature_count(), 0);
             assert_eq!(ff.feature_data(17123), None);
             assert_eq!(ff.has_node_ref(123), false);
