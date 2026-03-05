@@ -76,11 +76,11 @@ jobs:
       - name: Copy SBOM out of container
         run: |
           IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-${{ matrix.arch }}
-          podman create --name ${{ env.IMAGE_NAME }} ${ IMAGE }
+          podman create --name diffed-places-pipeline ${IMAGE}
           podman cp \
-            ${{ env.IMAGE_NAME }}:/sbom/diffed-places-pipeline.cdx.json \
+            diffed-places-pipeline:/sbom/diffed-places-pipeline.cdx.json \
             artifacts/diffed-places-pipeline.cdx.json
-          podman rm ${{ env.IMAGE_NAME }}
+          podman rm diffed-places-pipeline
 
       - name: Upload image digest and SBOM to artifacts
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f  # v7.0.0
