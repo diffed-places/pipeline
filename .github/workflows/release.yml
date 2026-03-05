@@ -73,12 +73,17 @@ jobs:
           podman push ${IMAGE} \
             --digestfile artifacts/digest.txt
 
-      - name: Upload image digests to artifacts
+      - name: Copy SBOM out of container
+          IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-${{ matrix.arch }}
+          podman cp ${IMAGE}:/sbom/diffed-places-pipeline.cdx.json \
+            artifacts/diffed-places-pipeline.cdx.json
+
+      - name: Upload image digest and SBOM to artifacts
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f  # v7.0.0
         with:
           name: artifacts-${{ matrix.arch }}
           path: artifacts
-          retention-days: 3
+          retention-days: 30
 
   manifest:
     name: Build multi-architecture manifest
@@ -143,6 +148,7 @@ jobs:
     needs: [manifest]
 
     permissions:
+      artifact-metadata: write
       attestations: write
       id-token: write
       packages: write
@@ -165,22 +171,32 @@ jobs:
           echo arm64_digest=`cat artifacts-arm64/digest.txt` >> $GITHUB_OUTPUT
           echo manifest_digest=`cat artifacts-manifest/digest.txt` >> $GITHUB_OUTPUT
 
+      - name: Attest amd64 SBOM
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 #v4.1.0
+        with:
+          sbom-path: artifacts-amd64/diffed-places-pipeline.cdx.json
+
+      - name: Attest arm64 SBOM
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 #v4.1.0
+        with:
+          sbom-path: artifacts-arm64/diffed-places-pipeline.cdx.json
+
       - name: Attest amd64 container
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32  #v4.1.0
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 #v4.1.0
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.retrieve-digests.outputs.amd64_digest }}
           push-to-registry: true
 
       - name: Attest arm64 container
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32  #v4.1.0
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 #v4.1.0
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.retrieve-digests.outputs.arm64_digest }}
           push-to-registry: true
 
       - name: Attest multi-architecture manifest
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32  #v4.1.0
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 #v4.1.0
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.retrieve-digests.outputs.manifest_digest }}
