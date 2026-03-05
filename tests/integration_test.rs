@@ -18,7 +18,7 @@ fn test_pipeline() -> Result<()> {
     osm.push("tests/test_data/zugerland.osm.pbf");
     symlink(&osm, workdir.path().join("openstreetmap.pbf"))?;
 
-    Command::new(cargo_bin!("diffed-places"))
+    Command::new(cargo_bin!("diffed-places-pipeline"))
         .arg("run")
         .arg("--atp")
         .arg(&atp)
@@ -34,7 +34,7 @@ fn test_pipeline() -> Result<()> {
 
 #[test]
 fn test_no_subcommand() {
-    Command::new(cargo_bin!("diffed-places"))
+    Command::new(cargo_bin!("diffed-places-pipeline"))
         .assert()
         .failure()
         .stderr(predicates::str::contains("no subcommand given"));
