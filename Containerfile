@@ -1,4 +1,4 @@
-# Build and package the diffed-places binary as a container.
+# Build and package the diffed-places-pipeline binary as a container.
 #
 # This file is used in continuous integration to automatically build
 # containers; as a regular developer, you do not need to do this.
@@ -21,10 +21,10 @@ COPY Cargo.toml Cargo.lock .
 COPY src src
 COPY tests tests
 
-RUN apk add --no-cache syft
+RUN cargo install cargo-cyclonedx
 RUN cargo build --release
 RUN cargo test --release
-RUN syft scan dir:. --source-name diffed-places -o cyclonedx-json=sbom.cdx.json
+RUN cargo cyclonedx --no-build-deps --format json --spec-version=1.5
 
 
 # ----------------------------------------------------------------------------
@@ -38,13 +38,13 @@ ARG VCS_REF
 ARG VCS_URL
 
 COPY --from=builder --chown=1000:1000  \
-    /usr/diffed-places/target/release/diffed-places /app/diffed-places
+    /usr/diffed-places/target/release/diffed-places-pipeline /app/diffed-places-pipeline
 COPY --from=builder --chown=1000:1000 \
-    /usr/diffed-places/sbom.cdx.json /sbom/sbom.cdx.json
+    /usr/diffed-places/diffed-places-pipeline.cdx.json /sbom/diffed-places-pipeline.cdx.json
 
 USER 1000
 
-ENTRYPOINT ["/app/diffed-places"]
+ENTRYPOINT ["/app/diffed-places-pipeline"]
 
 LABEL  \
     org.opencontainers.image.authors="Sascha Brawer <sascha@brawer.ch>"  \
@@ -52,6 +52,6 @@ LABEL  \
     org.opencontainers.image.description="Data pipeline for Diffed Places"  \
     org.opencontainers.image.licenses="MIT"  \
     org.opencontainers.image.revision=$VCS_REF  \
-    org.opencontainers.image.sbom="/sbom/sbom.cdx.json"  \
+    org.opencontainers.image.sbom="/sbom/diffed-places-pipeline.cdx.json"  \
     org.opencontainers.image.source=$VCS_URL  \
     org.opencontainers.image.vendor="Sascha Brawer <sascha@brawer.ch>"

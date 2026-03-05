@@ -5,10 +5,10 @@ use clap::{Parser, Subcommand};
 use indicatif::MultiProgress;
 use std::fs::create_dir;
 
-use diffed_places::{build_coverage, import_atp, import_osm};
+use diffed_places_pipeline::{build_coverage, import_atp, import_osm};
 
 #[derive(Parser)]
-#[command(name = "diffed-places")]
+#[command(name = "diffed-places-pipeline")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
