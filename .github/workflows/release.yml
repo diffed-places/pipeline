@@ -74,6 +74,7 @@ jobs:
             --digestfile artifacts/digest.txt
 
       - name: Copy SBOM out of container
+        run: |
           IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-${{ matrix.arch }}
           podman cp ${IMAGE}:/sbom/diffed-places-pipeline.cdx.json \
             artifacts/diffed-places-pipeline.cdx.json
