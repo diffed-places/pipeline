@@ -1,5 +1,4 @@
 name: Release
-id: release
 
 on:
   push:
