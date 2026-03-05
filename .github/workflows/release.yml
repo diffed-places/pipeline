@@ -1,9 +1,9 @@
-name: Container Build
+name: Release
+id: release
 
 on:
   push:
-    branches:
-      - main
+    tags: ['v*']  # triggered by pushing a tag such as 'v0.1.2'
 
 env:
   REGISTRY: ghcr.io
@@ -121,7 +121,9 @@ jobs:
           podman manifest create ${IMAGE_SHA}
           podman manifest add ${IMAGE_SHA} ${IMAGE_AMD64}
           podman manifest add ${IMAGE_SHA} ${IMAGE_ARM64}
-          podman tag ${IMAGE_SHA} ${IMAGE}:latest
+          podman tag ${IMAGE_SHA} ${IMAGE}:latest ${IMAGE}:${{ github.ref_name }}
+          podman manifest push ${IMAGE}:${{ github.ref_name }} \
+              --digestfile artifacts/digest.txt
           podman manifest push ${IMAGE}:latest \
               --digestfile artifacts/digest.txt
 
@@ -130,7 +132,7 @@ jobs:
         with:
           name: artifacts-manifest
           path: artifacts
-          retention-days: 3
+          retention-days: 30
 
 
   # If you ever refactor the GitHub workflow, make sure that the attest phase
@@ -178,7 +180,7 @@ jobs:
           subject-digest: ${{ steps.retrieve-digests.outputs.arm64_digest }}
           push-to-registry: true
 
-      - name: Attest manifest
+      - name: Attest multi-architecture manifest
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32  #v4.1.0
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
