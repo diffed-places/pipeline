@@ -179,11 +179,15 @@ jobs:
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 #v4.1.0
         with:
           sbom-path: artifacts-amd64/diffed-places-pipeline.cdx.json
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.retrieve-digests.outputs.amd64_digest }}
 
       - name: Attest arm64 SBOM
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 #v4.1.0
         with:
           sbom-path: artifacts-arm64/diffed-places-pipeline.cdx.json
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.retrieve-digests.outputs.arm64_digest }}
 
       - name: Attest amd64 container
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 #v4.1.0
