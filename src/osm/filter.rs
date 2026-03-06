@@ -1,4 +1,6 @@
-use super::{BlobReader, coords::Coords};
+use super::{
+    BlobReader, FeatureStore, MemberRole, Node, Relation, RelationMember, Way, coords::Coords,
+};
 use crate::coverage::{Coverage, is_wikidata_key, parse_wikidata_ids};
 use crate::{u64_table, u64_table::U64Table};
 use anyhow::{Ok, Result};
@@ -7,32 +9,69 @@ use osm_pbf_iter::{Blob, Primitive, PrimitiveBlock, RelationMemberType};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, remove_file, rename};
-use std::io::{BufWriter, Read, Seek, Write};
+use std::io::{BufWriter, Cursor, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::sync_channel;
 use std::thread;
 
 use filtered_file::FilteredFile;
 
-#[derive(Deserialize, Serialize)]
-pub struct Node {
-    pub id: u64,
-    pub tags: Vec<String>,
-    pub lon_e7: i32,
-    pub lat_e7: i32,
+pub struct FilteredFeatureStore<'a> {
+    nodes: &'a FilteredFile<'a>,
+    ways: &'a FilteredFile<'a>,
+    relations: &'a FilteredFile<'a>,
 }
 
-#[derive(Deserialize, Serialize)]
-pub struct Way {
-    pub id: u64,
-    pub nodes: Vec<u64>,
-    pub tags: Vec<String>,
+impl<'a> FilteredFeatureStore<'a> {
+    pub fn new(
+        nodes: &'a FilteredFile<'a>,
+        ways: &'a FilteredFile<'a>,
+        relations: &'a FilteredFile<'a>,
+    ) -> FilteredFeatureStore<'a> {
+        FilteredFeatureStore {
+            nodes,
+            ways,
+            relations,
+        }
+    }
 }
 
-#[derive(Deserialize, Serialize)]
-pub struct Relation {
-    id: u64,
-    tags: Vec<String>,
+impl<'a> FeatureStore for FilteredFeatureStore<'a> {
+    fn node_count(&self) -> u64 {
+        self.nodes.feature_count() as u64
+    }
+
+    fn way_count(&self) -> u64 {
+        self.ways.feature_count() as u64
+    }
+
+    fn relation_count(&self) -> u64 {
+        self.relations.feature_count() as u64
+    }
+
+    fn get_coord(&self, node_id: u64) -> Option<geo::Coord> {
+        self.nodes.get_coord(node_id)
+    }
+
+    fn get_nth_node(&self, n: u64) -> Option<Node> {
+        if let Some(data) = self.nodes.feature_data(usize::try_from(n).ok()?) {
+            let mut d = rmp_serde::Deserializer::new(Cursor::new(data));
+            if let std::result::Result::Ok(node) = Node::deserialize(&mut d) {
+                return Some(node);
+            }
+        }
+        None
+    }
+
+    fn get_nth_way(&self, n: u64) -> Option<Way> {
+        if let Some(data) = self.ways.feature_data(usize::try_from(n).ok()?) {
+            let mut d = rmp_serde::Deserializer::new(Cursor::new(data));
+            if let std::result::Result::Ok(way) = Way::deserialize(&mut d) {
+                return Some(way);
+            }
+        }
+        None
+    }
 }
 
 // TODO: Handle recursive relations.
@@ -83,18 +122,38 @@ pub fn filter_relations<'a, R: Read + Seek + Send>(
                             .tags()
                             .flat_map(|(k, v)| [k.to_string(), v.to_string()])
                             .collect();
-                        for (_name, member_id, member_type) in rel.members() {
-                            match member_type {
+
+                        let mut members = Vec::<RelationMember>::with_capacity(5);
+                        for (role_name, member_id, member_type) in rel.members() {
+                            let role = MemberRole::from_str(role_name);
+                            let member = match member_type {
                                 RelationMemberType::Node => {
                                     node_ref_tx.send(member_id)?;
+                                    RelationMember::Node {
+                                        id: member_id,
+                                        role,
+                                    }
                                 }
                                 RelationMemberType::Way => {
                                     way_ref_tx.send(member_id)?;
+                                    RelationMember::Way {
+                                        id: member_id,
+                                        role,
+                                    }
                                 }
-                                _ => {}
-                            }
+                                RelationMemberType::Relation => RelationMember::Relation {
+                                    id: member_id,
+                                    role,
+                                },
+                            };
+                            members.push(member);
                         }
-                        rel_tx.send(Relation { id: rel.id, tags })?;
+
+                        rel_tx.send(Relation {
+                            id: rel.id,
+                            tags,
+                            members,
+                        })?;
                     }
                 }
                 Ok(())
