@@ -146,3 +146,83 @@ fn write_places(
     progress_bar.finish_with_message(format!("{} features", feature_count));
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{assemble_nodes, assemble_ways};
+    use crate::osm::{Node, Way, tests::MockFeatureStore};
+    use crate::place::Place;
+    use anyhow::{Ok, Result};
+    use indicatif::{ProgressBar, ProgressDrawTarget};
+    use std::sync::mpsc::sync_channel;
+
+    #[test]
+    fn test_assemble_nodes() -> Result<()> {
+        let store = MockFeatureStore::new(
+            vec![Node {
+                id: 12345,
+                tags: vec![String::from("a"), String::from("aa")],
+                lon_e7: 11_000_000_0,
+                lat_e7: 12_000_000_0,
+            }],
+            vec![],
+            vec![],
+        );
+        let progress = ProgressBar::with_draw_target(None, ProgressDrawTarget::hidden());
+        let (tx, rx) = sync_channel::<Place>(50);
+        assemble_nodes(&store, &progress, tx)?;
+        let mut rx = rx.into_iter();
+
+        let mut want = Place::new(
+            &geo::Coord { x: 11.0, y: 12.0 },
+            String::from("n"),
+            vec![(String::from("a"), String::from("aa"))],
+        )
+        .expect("cannot construct wanted Place");
+        want.osm_id = 12345;
+        assert_eq!(rx.next(), Some(want));
+        assert_eq!(rx.next(), None);
+        Ok(())
+    }
+
+    #[test]
+    fn test_assemble_ways() -> Result<()> {
+        let store = MockFeatureStore::new(
+            vec![
+                Node {
+                    id: 1,
+                    tags: vec![],
+                    lon_e7: 50_000_000_0,
+                    lat_e7: 20_000_000_0,
+                },
+                Node {
+                    id: 2,
+                    tags: vec![],
+                    lon_e7: 70_000_000_0,
+                    lat_e7: 40_000_000_0,
+                },
+            ],
+            vec![Way {
+                id: 3,
+                nodes: vec![1, 2, 666],
+                tags: vec![String::from("foo"), String::from("bar")],
+            }],
+            vec![],
+        );
+        let progress = ProgressBar::with_draw_target(None, ProgressDrawTarget::hidden());
+        let (tx, rx) = sync_channel::<Place>(50);
+        assemble_ways(&store, &progress, tx)?;
+        let mut rx = rx.into_iter();
+
+        let mut want = Place::new(
+            &geo::Coord { x: 60.0, y: 30.0 }, // centroid
+            String::from("w"),
+            vec![(String::from("foo"), String::from("bar"))],
+        )
+        .expect("cannot construct wanted Place");
+        want.osm_id = 3;
+        assert_eq!(rx.next(), Some(want));
+        assert_eq!(rx.next(), None);
+        Ok(())
+    }
+}

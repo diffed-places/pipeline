@@ -453,7 +453,6 @@ mod tests {
     use std::io::Cursor;
     use std::path::PathBuf;
 
-    #[allow(unused)] // TODO: Remove attribute once we use MockFeatureStore.
     pub struct MockFeatureStore {
         nodes: HashMap<u64, Node>,
         ways: HashMap<u64, Way>,
@@ -461,11 +460,12 @@ mod tests {
 
         node_ids: Vec<u64>,
         way_ids: Vec<u64>,
+
+        #[allow(unused)] // TODO: Remove attribute once we use relations in FeatureStore.
         relation_ids: Vec<u64>,
     }
 
     impl MockFeatureStore {
-        #[allow(unused)] // TODO: Remove attribute once we use MockFeatureStore.
         pub fn new(nodes: Vec<Node>, ways: Vec<Way>, relations: Vec<Relation>) -> MockFeatureStore {
             let node_ids = nodes.iter().map(|node| node.id).collect();
             let way_ids = ways.iter().map(|way| way.id).collect();
