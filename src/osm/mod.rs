@@ -3,6 +3,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use osm_pbf_iter::{Blob, Primitive, PrimitiveBlock, RelationMemberType};
 use protobuf_iter::MessageIter;
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -61,7 +62,7 @@ pub fn import_osm(
         workdir,
     )?;
 
-    let filtered_relations = filter::filter_relations(
+    let relations = filter::filter_relations(
         &mut reader,
         rel_blobs,
         &coverage,
@@ -70,35 +71,29 @@ pub fn import_osm(
         workdir,
     )?;
 
-    let filtered_ways = filter::filter_ways(
+    let ways = filter::filter_ways(
         &mut reader,
         way_blobs,
         &coverage,
         &covered_ways,
-        &filtered_relations,
+        &relations,
         progress,
         workdir,
     )?;
 
-    let filtered_nodes = filter::filter_nodes(
+    let nodes = filter::filter_nodes(
         &mut reader,
         node_blobs,
         &coverage,
         &covered_nodes,
-        &filtered_ways,
-        &filtered_relations,
+        &ways,
+        &relations,
         progress,
         workdir,
     )?;
 
-    assemble::assemble(
-        &filtered_nodes,
-        &filtered_ways,
-        &filtered_relations,
-        progress,
-        workdir,
-        &out_path,
-    )?;
+    let feature_store = filter::FilteredFeatureStore::new(&nodes, &ways, &relations);
+    assemble::assemble(&feature_store, progress, workdir, &out_path)?;
 
     Ok(out_path)
 }
@@ -117,6 +112,70 @@ fn make_progress_bar(
     bar.set_style(style);
 
     bar
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct Node {
+    id: u64,
+    tags: Vec<String>,
+    lon_e7: i32,
+    lat_e7: i32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct Way {
+    id: u64,
+    nodes: Vec<u64>,
+    tags: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct Relation {
+    id: u64,
+    tags: Vec<String>,
+    members: Vec<RelationMember>,
+}
+
+/// Role of a member inside a relation.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+enum MemberRole {
+    Outer,
+    Inner,
+    Other(String),
+}
+
+impl MemberRole {
+    fn from_str(s: &str) -> Self {
+        match s {
+            "outer" => MemberRole::Outer,
+            "inner" => MemberRole::Inner,
+            other => MemberRole::Other(other.to_owned()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+enum RelationMember {
+    Node { id: u64, role: MemberRole },
+    Way { id: u64, role: MemberRole },
+    Relation { id: u64, role: MemberRole },
+}
+
+/// Abstracts OSM feature retrieval, so the geometry logic is independent of the storage.
+/// Implemented by MockFeatureStore for testing, and FilteredFeatureStore in production.
+trait FeatureStore: Send + Sync {
+    fn node_count(&self) -> u64;
+    fn way_count(&self) -> u64;
+    fn relation_count(&self) -> u64;
+
+    fn get_coord(&self, node_id: u64) -> Option<geo::Coord>;
+    fn get_nth_node(&self, n: u64) -> Option<Node>;
+    fn get_nth_way(&self, n: u64) -> Option<Way>;
+    //fn get_nth_relation(&self, n: u64) -> Option<Relation>;
+
+    //fn get_node(&self, id: u64) -> Option<Node>;
+    //fn get_way(&self, id: u64) -> Option<Way>;
+    //fn get_relation(&self, id: u64) -> Option<Relation>;
 }
 
 fn read_blobs<R: Read + Seek + Send>(
@@ -390,8 +449,83 @@ impl ParentChainExt for HashMap<u64, u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use std::io::Cursor;
     use std::path::PathBuf;
+
+    #[allow(unused)] // TODO: Remove attribute once we use MockFeatureStore.
+    pub struct MockFeatureStore {
+        nodes: HashMap<u64, Node>,
+        ways: HashMap<u64, Way>,
+        relations: HashMap<u64, Relation>,
+
+        node_ids: Vec<u64>,
+        way_ids: Vec<u64>,
+        relation_ids: Vec<u64>,
+    }
+
+    impl MockFeatureStore {
+        #[allow(unused)] // TODO: Remove attribute once we use MockFeatureStore.
+        pub fn new(nodes: Vec<Node>, ways: Vec<Way>, relations: Vec<Relation>) -> MockFeatureStore {
+            let node_ids = nodes.iter().map(|node| node.id).collect();
+            let way_ids = ways.iter().map(|way| way.id).collect();
+            let relation_ids = relations.iter().map(|rel| rel.id).collect();
+
+            let nodes: HashMap<u64, Node> = nodes.into_iter().map(|n| (n.id, n)).collect();
+            let ways: HashMap<u64, Way> = ways.into_iter().map(|w| (w.id, w)).collect();
+            let relations: HashMap<u64, Relation> =
+                relations.into_iter().map(|r| (r.id, r)).collect();
+
+            MockFeatureStore {
+                nodes,
+                ways,
+                relations,
+                node_ids,
+                way_ids,
+                relation_ids,
+            }
+        }
+    }
+
+    impl FeatureStore for MockFeatureStore {
+        fn node_count(&self) -> u64 {
+            self.nodes.len() as u64
+        }
+
+        fn way_count(&self) -> u64 {
+            self.ways.len() as u64
+        }
+
+        fn relation_count(&self) -> u64 {
+            self.relations.len() as u64
+        }
+
+        fn get_coord(&self, node_id: u64) -> Option<geo::Coord> {
+            let node = self.nodes.get(&node_id)?;
+            Some(geo::Coord {
+                x: node.lon_e7 as f64 * 1e-7,
+                y: node.lat_e7 as f64 * 1e-7,
+            })
+        }
+
+        fn get_nth_node(&self, n: u64) -> Option<Node> {
+            let n = usize::try_from(n).ok()?;
+            if n < self.node_ids.len() {
+                Some(self.nodes.get(&self.node_ids[n])?.clone())
+            } else {
+                None
+            }
+        }
+
+        fn get_nth_way(&self, n: u64) -> Option<Way> {
+            let n = usize::try_from(n).ok()?;
+            if n < self.way_ids.len() {
+                Some(self.ways.get(&self.way_ids[n])?.clone())
+            } else {
+                None
+            }
+        }
+    }
 
     #[test]
     fn test_blob_reader() -> Result<()> {

@@ -1,14 +1,10 @@
-use super::filter::{Node, Way, filtered_file::FilteredFile};
-use super::make_progress_bar;
+use super::{FeatureStore, make_progress_bar};
 use anyhow::{Ok, Result};
 use ext_sort::{ExternalSorter, ExternalSorterBuilder, buffer::mem::MemoryLimitedBufferBuilder};
 use geo::{Centroid, Coord, LineString};
 use indicatif::{MultiProgress, ProgressBar};
 use rayon::prelude::*;
-use rmp_serde::Deserializer;
-use serde::Deserialize;
 use std::fs::rename;
-use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
@@ -17,26 +13,22 @@ use std::thread;
 use crate::place::{ParquetWriter, Place};
 
 pub fn assemble(
-    nodes: &FilteredFile,
-    ways: &FilteredFile,
-    relations: &FilteredFile,
+    store: &dyn FeatureStore,
     progress: &MultiProgress,
     workdir: &Path,
     out_path: &Path,
 ) -> Result<()> {
     let (tx, rx) = sync_channel::<Place>(50_000);
-    let feature_count = nodes.feature_count() as u64
-        + ways.feature_count() as u64
-        + relations.feature_count() as u64;
+    let feature_count = store.node_count() + store.way_count() + store.relation_count();
     let progress_bar = make_progress_bar(progress, "osm.assemble.r", feature_count, "features");
     thread::scope(|s| {
         let node_handler = {
             let tx = tx.clone();
-            s.spawn(|| assemble_nodes(nodes, &progress_bar, tx))
+            s.spawn(|| assemble_nodes(store, &progress_bar, tx))
         };
         let way_handler = {
             let tx = tx.clone();
-            s.spawn(|| assemble_ways(nodes, ways, &progress_bar, tx))
+            s.spawn(|| assemble_ways(store, &progress_bar, tx))
         };
         let writer = s.spawn(|| write_places(rx, progress, workdir, out_path));
         node_handler
@@ -51,82 +43,71 @@ pub fn assemble(
 }
 
 fn assemble_nodes(
-    nodes: &FilteredFile,
+    store: &dyn FeatureStore,
     progress_bar: &ProgressBar,
     out: SyncSender<Place>,
 ) -> Result<()> {
-    (0..nodes.feature_count())
-        .into_par_iter()
-        .try_for_each(|i| {
-            if let Some(data) = nodes.feature_data(i) {
-                let mut d = Deserializer::new(Cursor::new(data));
-                if let std::result::Result::Ok(node) = Node::deserialize(&mut d) {
-                    let coord = Coord {
-                        x: node.lon_e7 as f64 * 1e-7,
-                        y: node.lat_e7 as f64 * 1e-7,
-                    };
-                    let source = String::from("n");
-                    let tags = node
-                        .tags
-                        .chunks_exact(2)
-                        .map(|c| (c[0].clone(), c[1].clone()))
-                        .collect();
-                    if let Some(mut place) = Place::new(&coord, source, tags) {
-                        place.osm_id = node.id;
-                        out.send(place)?;
-                    }
-                };
+    (0..store.node_count()).into_par_iter().try_for_each(|i| {
+        if let Some(node) = store.get_nth_node(i) {
+            let coord = Coord {
+                x: node.lon_e7 as f64 * 1e-7,
+                y: node.lat_e7 as f64 * 1e-7,
             };
-            progress_bar.inc(1);
-            Ok(())
-        })
+            let source = String::from("n");
+            let tags = node
+                .tags
+                .chunks_exact(2)
+                .map(|c| (c[0].clone(), c[1].clone()))
+                .collect();
+            if let Some(mut place) = Place::new(&coord, source, tags) {
+                place.osm_id = node.id;
+                out.send(place)?;
+            }
+        };
+        progress_bar.inc(1);
+        Ok(())
+    })
 }
 
 fn assemble_ways(
-    nodes: &FilteredFile,
-    ways: &FilteredFile,
+    store: &dyn FeatureStore,
     progress_bar: &ProgressBar,
     out: SyncSender<Place>,
 ) -> Result<()> {
-    (0..ways.feature_count())
-        .into_par_iter()
-        .try_for_each(|i| {
-            if let Some(data) = ways.feature_data(i) {
-                let mut d = Deserializer::new(Cursor::new(data));
-                if let std::result::Result::Ok(way) = Way::deserialize(&mut d)
-                    && !way.tags.is_empty()
-                {
-                    let mut coords = Vec::<geo::Coord>::with_capacity(way.nodes.len());
-                    for node_id in way.nodes.iter() {
-                        if let Some(c) = nodes.get_coord(*node_id) {
-                            coords.push(c);
-                        }
-                    }
-
-                    // In theory, OpenStreetMap ways can self-intersect.
-                    // In practice, this is super rare and checked by
-                    // QA tools such as Osmose. So, we don’t really care
-                    // as long as the pipeline doesn’t crash. If this ever
-                    // becomes a real problem, we could use the geos crate.
-                    let linestring = LineString::new(coords);
-                    if let Some(centroid) = linestring.centroid() {
-                        let tags: Vec<(String, String)> = way
-                            .tags
-                            .chunks_exact(2)
-                            .map(|c| (c[0].clone(), c[1].clone()))
-                            .collect();
-                        let source = String::from("w");
-                        if let Some(mut place) = Place::new(&centroid.0, source, tags) {
-                            place.osm_id = way.id;
-                            out.send(place)?;
-                        }
-                    }
+    (0..store.way_count()).into_par_iter().try_for_each(|i| {
+        if let Some(way) = store.get_nth_way(i)
+            && !way.tags.is_empty()
+        {
+            let mut coords = Vec::<geo::Coord>::with_capacity(way.nodes.len());
+            for node_id in way.nodes.iter() {
+                if let Some(c) = store.get_coord(*node_id) {
+                    coords.push(c);
                 }
             }
 
-            progress_bar.inc(1);
-            Ok(())
-        })?;
+            // In theory, OpenStreetMap ways can self-intersect.
+            // In practice, this is super rare and checked by
+            // QA tools such as Osmose. So, we don’t really care
+            // as long as the pipeline doesn’t crash. If this ever
+            // becomes a real problem, we could use the geos crate.
+            let linestring = LineString::new(coords);
+            if let Some(centroid) = linestring.centroid() {
+                let tags: Vec<(String, String)> = way
+                    .tags
+                    .chunks_exact(2)
+                    .map(|c| (c[0].clone(), c[1].clone()))
+                    .collect();
+                let source = String::from("w");
+                if let Some(mut place) = Place::new(&centroid.0, source, tags) {
+                    place.osm_id = way.id;
+                    out.send(place)?;
+                }
+            }
+        }
+
+        progress_bar.inc(1);
+        Ok(())
+    })?;
     Ok(())
 }
 
