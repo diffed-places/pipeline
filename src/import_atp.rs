@@ -47,9 +47,12 @@ fn process_places(
 ) -> Result<()> {
     let mut tmp = PathBuf::from(out);
     tmp.add_extension("tmp");
-
-    let mut writer =
-        ParquetWriter::try_new(/* batch size */ 64 * 1024, /* osm */ false, &tmp)?;
+    let mut writer = ParquetWriter::try_new(
+        /* batch size, in records */ 64 * 1024,
+        /* page size, in bytes */ 1024 * 1024,
+        /* osm */ false,
+        &tmp,
+    )?;
     let sorter: ExternalSorter<Place, std::io::Error, MemoryLimitedBufferBuilder> =
         ExternalSorterBuilder::new()
             .with_tmp_dir(workdir)

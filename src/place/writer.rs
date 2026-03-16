@@ -9,7 +9,7 @@ use arrow::{
 use parquet::{
     arrow::ArrowWriter,
     basic::{Compression, ZstdLevel},
-    file::properties::WriterProperties,
+    file::properties::{EnabledStatistics, WriterProperties},
 };
 use std::collections::HashMap;
 use std::fs::File;
@@ -25,12 +25,19 @@ pub struct ParquetWriter {
 }
 
 impl ParquetWriter {
-    pub fn try_new(batch_size: usize, osm: bool, out: &Path) -> Result<ParquetWriter> {
+    pub fn try_new(
+        batch_size: usize,
+        page_size: usize, // 1 MiB is a good value for production data
+        osm: bool,
+        out: &Path,
+    ) -> Result<ParquetWriter> {
         assert!(batch_size > 0);
         let file = File::create(out)?;
         let schema = Arc::new(make_schema(osm));
         let props = WriterProperties::builder()
             .set_compression(Compression::ZSTD(ZstdLevel::try_new(15)?))
+            .set_statistics_enabled(EnabledStatistics::Page)
+            .set_data_page_size_limit(page_size)
             .build();
         let writer = ArrowWriter::try_new(file, schema.clone(), Some(props))?;
         Ok(ParquetWriter {
