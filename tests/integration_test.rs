@@ -16,14 +16,12 @@ fn test_pipeline() -> Result<()> {
 
     let mut osm = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     osm.push("tests/test_data/zugerland.osm.pbf");
-    symlink(&osm, workdir.path().join("openstreetmap.pbf"))?;
+    symlink(&osm, workdir.path().join("osm-planet.pbf"))?;
 
     Command::new(cargo_bin!("diffed-places-pipeline"))
         .arg("run")
         .arg("--atp")
         .arg(&atp)
-        .arg("--osm")
-        .arg(&osm)
         .arg("--workdir")
         .arg(workdir.path())
         .assert()
