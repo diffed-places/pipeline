@@ -17,14 +17,10 @@ use crate::coverage::Coverage;
 mod assemble;
 mod coords;
 mod cover;
+mod fetch;
 mod filter;
 
-pub fn import_osm(
-    pbf: &Path,
-    coverage: &Path,
-    progress: &MultiProgress,
-    workdir: &Path,
-) -> Result<PathBuf> {
+pub fn import_osm(coverage: &Path, progress: &MultiProgress, workdir: &Path) -> Result<PathBuf> {
     assert!(workdir.exists());
 
     let out_path = workdir.join("osm.parquet");
@@ -32,8 +28,9 @@ pub fn import_osm(
         return Ok(out_path);
     }
 
+    let pbf = fetch::fetch_planet(progress, workdir)?;
     let pbf_error = || format!("could not open file `{:?}`", pbf);
-    let mut file = File::open(pbf).with_context(pbf_error)?;
+    let mut file = File::open(&pbf).with_context(pbf_error)?;
     let mut reader = BlobReader::try_new(&mut file).with_context(pbf_error)?;
 
     // Partition the PBF file into blobs with nodes, ways and relations.

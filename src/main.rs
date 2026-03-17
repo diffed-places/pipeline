@@ -20,9 +20,6 @@ enum Commands {
         #[arg(short, long, value_name = "alltheplaces.zip")]
         atp: PathBuf,
 
-        #[arg(long, value_name = "openstreetmap.pbf")]
-        osm: PathBuf,
-
         #[arg(short, long, value_name = "workdir")]
         workdir: PathBuf,
     },
@@ -32,7 +29,7 @@ fn main() -> Result<()> {
     let args = Cli::parse();
     env_logger::init();
     match &args.command {
-        Some(Commands::Run { atp, osm, workdir }) => {
+        Some(Commands::Run { atp, workdir }) => {
             let progress = MultiProgress::new();
             if !workdir.exists() {
                 create_dir(workdir)?;
@@ -40,7 +37,7 @@ fn main() -> Result<()> {
 
             let atp = import_atp(atp, &progress, workdir)?;
             let coverage = build_coverage(&atp, &progress, workdir)?;
-            import_osm(osm, &coverage, &progress, workdir)?;
+            import_osm(&coverage, &progress, workdir)?;
             Ok(())
         }
         None => Err(anyhow!("no subcommand given")),
