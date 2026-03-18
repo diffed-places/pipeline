@@ -20,8 +20,6 @@ fn test_pipeline() -> Result<()> {
 
     Command::new(cargo_bin!("diffed-places-pipeline"))
         .arg("run")
-        .arg("--atp")
-        .arg(&atp)
         .arg("--workdir")
         .arg(workdir.path())
         .assert()

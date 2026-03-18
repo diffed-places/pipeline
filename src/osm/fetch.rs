@@ -1,4 +1,4 @@
-use super::make_progress_bar;
+use crate::make_download_bar;
 use anyhow::{Ok, Result};
 use indicatif::MultiProgress;
 use librqbit::{AddTorrent, AddTorrentOptions, Session, SessionOptions};
@@ -59,7 +59,7 @@ async fn download_osm_planet(
         tokio::time::sleep(Duration::from_millis(200)).await;
     };
 
-    let bar = make_progress_bar(progress, "osm.fetch     ", torrent_size, "bytes");
+    let bar = make_download_bar(progress, "osm.fetch     ", Some(torrent_size));
     let progress_task = tokio::spawn({
         let handle = handle.clone();
         let bar = bar.clone();
