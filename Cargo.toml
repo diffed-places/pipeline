@@ -13,7 +13,7 @@ env_logger = { version = "0.11.9", default-features = false }
 ext-sort = { version = "0.1.5", features = ["memory-limit"] }
 geo = "0.32.0"
 geo-traits = { version = "0.3.0", default-features = false }
-geojson = "0.24.2"
+geojson = "1.0.0"
 indicatif = { version = "0.18.4", default-features = false }
 librqbit = { version = "8.1.1", default-features = false, features = ["disable-upload", "rust-tls"] }
 log = { version = "0.4.29", default-features = false }
