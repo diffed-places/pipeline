@@ -364,7 +364,7 @@ mod writer {
 
         let bar = progress.add(ProgressBar::new(num_rows));
         bar.set_style(ProgressStyle::with_template(PROGRESS_BAR_STYLE)?);
-        bar.set_prefix("cov.read ");
+        bar.set_prefix("coverage.read ");
         bar.set_message("features");
 
         (0..num_row_groups)
@@ -457,7 +457,7 @@ mod writer {
 
         let bar = progress.add(ProgressBar::new(num_cells.load(Ordering::SeqCst)));
         bar.set_style(ProgressStyle::with_template(PROGRESS_BAR_STYLE)?);
-        bar.set_prefix("cov.write");
+        bar.set_prefix("coverage.write");
         bar.set_message("s2 cells");
 
         for cur in sorted {

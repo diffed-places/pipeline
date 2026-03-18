@@ -7,6 +7,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use memmap2::Mmap;
 use piz::ZipArchive;
 use rayon::prelude::*;
+use reqwest::Client;
 use std::fs::{File, rename};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -16,21 +17,24 @@ use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use crate::PROGRESS_BAR_STYLE;
 use crate::place::{ParquetWriter, Place};
 
-pub fn import_atp(input: &Path, progress: &MultiProgress, workdir: &Path) -> Result<PathBuf> {
+mod fetch;
+
+pub async fn import_atp(progress: &MultiProgress, workdir: &Path) -> Result<PathBuf> {
     let out = workdir.join("alltheplaces.parquet");
-    if !out.exists() {
-        log::info!("import_atp is starting");
-    } else {
-        log::info!("skipping import_atp, already found {:?}", out);
+    if out.exists() {
         return Ok(out);
     }
+
+    let client = Client::new();
+    let input_zip =
+        fetch::fetch_atp(fetch::ATP_RUN_HISTORY_URL, &client, progress, workdir).await?;
 
     // To avoid deadlock, we must not use Rayon threads here.
     // https://dev.to/sgchris/scoped-threads-with-stdthreadscope-in-rust-163-48f9
     let (tx, rx) = sync_channel(50_000);
     let (ra, rb) = std::thread::scope(|s| {
         let r1 = s.spawn(|| process_places(rx, progress, workdir, &out));
-        let r2 = s.spawn(|| process_zip(input, progress, tx));
+        let r2 = s.spawn(|| process_zip(&input_zip, progress, tx));
         (r1.join().unwrap(), r2.join().unwrap())
     });
     ra?;
@@ -68,7 +72,7 @@ fn process_places(
 
     let bar = progress.add(ProgressBar::new(num_features));
     bar.set_style(ProgressStyle::with_template(PROGRESS_BAR_STYLE)?);
-    bar.set_prefix("atp.write");
+    bar.set_prefix("atp.write     ");
     bar.set_message("features");
 
     for place in sorted {
@@ -94,7 +98,7 @@ fn process_zip(path: &Path, progress: &MultiProgress, channel: SyncSender<Place>
         .context("Couldn't load archive")?
         .0;
     let bar = progress.add(ProgressBar::new(archive.entries().len() as u64));
-    bar.set_prefix("atp.read ");
+    bar.set_prefix("atp.read      ");
     bar.set_style(ProgressStyle::with_template(PROGRESS_BAR_STYLE)?);
     bar.set_message("feature collections");
 

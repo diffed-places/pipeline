@@ -1,5 +1,5 @@
 use anyhow::{Context, Ok, Result, anyhow};
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar};
 use osm_pbf_iter::{Blob, Primitive, PrimitiveBlock, RelationMemberType};
 use protobuf_iter::MessageIter;
 use rayon::prelude::*;
@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{SyncSender, sync_channel};
 use std::thread;
 
-use crate::PROGRESS_BAR_STYLE;
 use crate::coverage::Coverage;
+use crate::make_progress_bar;
 
 mod assemble;
 mod coords;
@@ -93,22 +93,6 @@ pub fn import_osm(coverage: &Path, progress: &MultiProgress, workdir: &Path) -> 
     assemble::assemble(&feature_store, progress, workdir, &out_path)?;
 
     Ok(out_path)
-}
-
-fn make_progress_bar(
-    progress: &MultiProgress,
-    phase: &str,
-    max_value: u64,
-    message: &str,
-) -> ProgressBar {
-    let bar = progress.add(ProgressBar::new(max_value));
-    bar.set_prefix(String::from(phase));
-    bar.set_message(String::from(message));
-
-    let style = ProgressStyle::with_template(PROGRESS_BAR_STYLE).expect("bad PROGRESS_BAR_STYLE");
-    bar.set_style(style);
-
-    bar
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
