@@ -21,6 +21,7 @@ COPY Cargo.toml Cargo.lock .
 COPY src src
 COPY tests tests
 
+RUN apk add --no-cache ca-certificates
 RUN cargo install cargo-cyclonedx
 RUN cargo build --release
 RUN cargo test --release
@@ -37,10 +38,14 @@ ARG BUILD_TIMESTAMP
 ARG VCS_REF
 ARG VCS_URL
 
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+
 COPY --from=builder --chown=1000:1000  \
-    /usr/diffed-places/target/release/diffed-places-pipeline /app/diffed-places-pipeline
+    /usr/diffed-places/target/release/diffed-places-pipeline  \
+    /app/diffed-places-pipeline
 COPY --from=builder --chown=1000:1000 \
-    /usr/diffed-places/diffed-places-pipeline.cdx.json /sbom/diffed-places-pipeline.cdx.json
+    /usr/diffed-places/diffed-places-pipeline.cdx.json  \
+    /sbom/diffed-places-pipeline.cdx.json
 
 USER 1000
 
