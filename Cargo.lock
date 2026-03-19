@@ -865,6 +865,7 @@ dependencies = [
  "anyhow",
  "arrow",
  "assert_cmd",
+ "aws-lc-rs",
  "clap",
  "deepsize",
  "deepsize_derive",
@@ -887,11 +888,13 @@ dependencies = [
  "rayon",
  "reqwest 0.13.2",
  "rmp-serde",
+ "rustls",
  "s2",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
+ "webpki-roots",
 ]
 
 [[package]]

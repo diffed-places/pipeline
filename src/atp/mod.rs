@@ -19,15 +19,17 @@ use crate::place::{ParquetWriter, Place};
 
 mod fetch;
 
-pub async fn import_atp(progress: &MultiProgress, workdir: &Path) -> Result<PathBuf> {
+pub async fn import_atp(
+    client: &Client,
+    progress: &MultiProgress,
+    workdir: &Path,
+) -> Result<PathBuf> {
     let out = workdir.join("alltheplaces.parquet");
     if out.exists() {
         return Ok(out);
     }
 
-    let client = Client::new();
-    let input_zip =
-        fetch::fetch_atp(fetch::ATP_RUN_HISTORY_URL, &client, progress, workdir).await?;
+    let input_zip = fetch::fetch_atp(fetch::ATP_RUN_HISTORY_URL, client, progress, workdir).await?;
 
     // To avoid deadlock, we must not use Rayon threads here.
     // https://dev.to/sgchris/scoped-threads-with-stdthreadscope-in-rust-163-48f9
