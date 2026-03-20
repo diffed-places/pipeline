@@ -26,7 +26,7 @@
       "cryptoProperties": {
         "assetType": "related-crypto-material",
         "relatedCryptoMaterialProperties": {
-          "type": "trust-anchor-table"
+          "type": "other"
         }
       },
       "externalReferences": [
@@ -40,7 +40,7 @@
   ],
   "dependencies": [
     {
-      "ref": "your-app-bom-ref",
+      "ref": "mozilla-webpki-ca-bundle",
       "dependsOn": [
         "tls-1.3-protocol",
         "webpki-roots-ca-bundle"
