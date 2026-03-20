@@ -313,11 +313,16 @@ mod writer {
                 wikidata_ids = collect_wikidata_ids(wikidata_rx);
                 Ok(())
             });
-            producer
-                .join()
-                .expect("producer panic")
-                .and(cell_consumer.join().expect("cell consumer panic"))
-                .and(wikidata_consumer.join().expect("wikidata consumer panic"))
+
+            // If a consumer fails, it will close the receiver end of its channel,
+            // which causes the producer to fail as well. Therefore, we first check
+            // for errors on the consumer side; these are more informative.
+            // https://github.com/diffed-places/pipeline/issues/208
+            cell_consumer.join().expect("cell consumer panic")?;
+            wikidata_consumer.join().expect("wikidata consumer panic")?;
+            producer.join().expect("producer panic")?;
+
+            Ok(())
         })?;
 
         writer.set_wikidata_ids(wikidata_ids);
