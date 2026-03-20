@@ -860,7 +860,7 @@ dependencies = [
 
 [[package]]
 name = "diffed-places-pipeline"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "arrow",
