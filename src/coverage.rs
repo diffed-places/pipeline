@@ -308,7 +308,8 @@ mod writer {
             let (cell_tx, cell_rx) = sync_channel::<CellID>(50_000);
             let (wikidata_tx, wikidata_rx) = sync_channel::<u64>(1000);
             let producer = s.spawn(move || read_places(atp, progress, cell_tx, wikidata_tx));
-            let cell_consumer = s.spawn(|| build_spatial_coverage(cell_rx, progress, &mut writer));
+            let cell_consumer =
+                s.spawn(|| build_spatial_coverage(cell_rx, progress, workdir, &mut writer));
             let wikidata_consumer = s.spawn(|| {
                 wikidata_ids = collect_wikidata_ids(wikidata_rx);
                 Ok(())
@@ -446,12 +447,13 @@ mod writer {
     fn build_spatial_coverage(
         cells: Receiver<CellID>,
         progress: &MultiProgress,
+        workdir: &Path,
         writer: &mut CoverageWriter,
     ) -> Result<()> {
         let num_cells = AtomicU64::new(0);
         let sorter: ExternalSorter<CellID, std::io::Error, LimitedBufferBuilder> =
             ExternalSorterBuilder::new()
-                .with_tmp_dir(Path::new("./"))
+                .with_tmp_dir(workdir)
                 .with_buffer(LimitedBufferBuilder::new(
                     1_000_000, /* preallocate */ true,
                 ))
