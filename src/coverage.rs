@@ -298,15 +298,16 @@ mod writer {
         tmp.add_extension("tmp");
         let mut writer = CoverageWriter::try_new(&tmp)?;
 
+        // The AllThePlaces dump of 2026-01-03 references 3791 unique wikidata ids,
+        // which trivially fits into memory; no need for external sorting.
+        let mut wikidata_ids = Vec::<u64>::new();
+
         // To avoid deadlock, we must not use Rayon threads here.
         // https://dev.to/sgchris/scoped-threads-with-stdthreadscope-in-rust-163-48f9
-        let (cell_tx, cell_rx) = sync_channel::<CellID>(50_000);
-        let (wikidata_tx, wikidata_rx) = sync_channel::<u64>(1000);
-
-        // The AllThePlaces dump of 2026-01-03 references 3791 unique wikidata ids.
-        let mut wikidata_ids = Vec::<u64>::new();
         std::thread::scope(|s| {
-            let producer = s.spawn(|| read_places(atp, progress, cell_tx, wikidata_tx));
+            let (cell_tx, cell_rx) = sync_channel::<CellID>(50_000);
+            let (wikidata_tx, wikidata_rx) = sync_channel::<u64>(1000);
+            let producer = s.spawn(move || read_places(atp, progress, cell_tx, wikidata_tx));
             let cell_consumer = s.spawn(|| build_spatial_coverage(cell_rx, progress, &mut writer));
             let wikidata_consumer = s.spawn(|| {
                 wikidata_ids = collect_wikidata_ids(wikidata_rx);
