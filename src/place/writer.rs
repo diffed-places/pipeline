@@ -1,7 +1,7 @@
 use super::Place;
 use anyhow::{Ok, Result};
 use arrow::{
-    array::{ArrayRef, MapArray, StringArray, StructArray, UInt8Array, UInt64Array},
+    array::{ArrayRef, MapArray, StringArray, StructArray, UInt8Array, UInt16Array, UInt64Array},
     buffer::OffsetBuffer,
     datatypes::{DataType, Field, Schema},
     record_batch::RecordBatch,
@@ -65,9 +65,12 @@ impl ParquetWriter {
     }
 
     fn flush(&mut self) -> Result<()> {
-        let mut values = Vec::<Arc<dyn arrow::array::Array>>::with_capacity(5);
+        let mut values = Vec::<Arc<dyn arrow::array::Array>>::with_capacity(6);
         values.push(Arc::new(UInt64Array::from_iter(
             self.places.iter().map(|p| p.s2_cell_id),
+        )));
+        values.push(Arc::new(UInt16Array::from_iter(
+            self.places.iter().map(|p| p.mask.0),
         )));
         if self.osm {
             values.push(Arc::new(StringArray::from_iter_values(
@@ -150,6 +153,7 @@ fn make_tags(places: &[Place], num_tags: usize) -> Arc<MapArray> {
 fn make_schema(osm: bool) -> Schema {
     let mut fields = vec![
         Field::new("s2_cell_id", DataType::UInt64, /* nullable */ false),
+        Field::new("mask", DataType::UInt16, /* nullable */ false),
         Field::new("source", DataType::Utf8, /* nullable */ false),
     ];
     if osm {

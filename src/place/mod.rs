@@ -1,3 +1,4 @@
+use crate::MatchMask;
 use deepsize::DeepSizeOf;
 use geo::Coord;
 use serde::{Deserialize, Serialize};
@@ -10,13 +11,19 @@ pub struct Place {
     pub s2_cell_id: u64,
     pub osm_id: u64,
     pub source: String,
+    pub mask: MatchMask,
     pub tags: Vec<(String, String)>,
 }
 
 impl Place {
-    pub fn new(coord: &Coord, source: String, tags: Vec<(String, String)>) -> Option<Place> {
+    pub fn new(
+        coord: &Coord,
+        source: String,
+        mask: MatchMask,
+        tags: Vec<(String, String)>,
+    ) -> Option<Place> {
         let s2_lat_lng = s2::latlng::LatLng::from_degrees(coord.y, coord.x);
-        if !s2_lat_lng.is_valid() {
+        if !s2_lat_lng.is_valid() || mask.is_empty() {
             return None;
         }
 
@@ -25,6 +32,7 @@ impl Place {
             s2_cell_id,
             osm_id: 0,
             source,
+            mask,
             tags,
         })
     }
@@ -33,6 +41,7 @@ impl Place {
 #[cfg(test)]
 mod tests {
     use super::Place;
+    use crate::MatchMask;
     use geo::Coord;
 
     #[test]
@@ -46,7 +55,7 @@ mod tests {
             ("building".to_string(), "tower".to_string()),
             ("name:gsw".to_string(), "Zytglogge".to_string()),
         ];
-        let place = Place::new(&p, source, tags.clone()).unwrap();
+        let place = Place::new(&p, source, MatchMask::SHOP, tags.clone()).unwrap();
         assert_eq!(place.s2_cell_id, 5156122125915201443);
         assert_eq!(place.source, "test/source");
         assert_eq!(place.tags, tags);
@@ -60,6 +69,7 @@ mod tests {
                 y: 46.9479801,
             },
             "test/source".to_string(),
+            MatchMask::SHOP,
             vec![],
         )
         .unwrap();
@@ -69,6 +79,7 @@ mod tests {
                 y: 37.8045878,
             },
             "test/source".to_string(),
+            MatchMask::SHOP,
             vec![],
         )
         .unwrap();

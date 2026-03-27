@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 
-use crate::PROGRESS_BAR_STYLE;
 use crate::place::{ParquetWriter, Place};
+use crate::{MatchMask, PROGRESS_BAR_STYLE};
 
 mod fetch;
 
@@ -166,6 +166,7 @@ fn make_place(geojson: &str) -> Option<Place> {
     let num_tags = properties.len();
     let mut tags =
         Vec::<(String, String)>::with_capacity(if num_tags > 3 { num_tags - 3 } else { num_tags });
+    let mut mask = MatchMask::default();
 
     for (key, val) in properties {
         // All The Places inserts an "nsi_id" for any features
@@ -196,9 +197,10 @@ fn make_place(geojson: &str) -> Option<Place> {
             continue;
         }
 
+        mask.add_tag(&key, &value);
         tags.push((key, value));
     }
-    Place::new(&coord, source?, tags)
+    Place::new(&coord, source?, mask, tags)
 }
 
 /// Finds a representative point for a GeoJson feature.
@@ -338,13 +340,8 @@ mod tests {
     }
 
     #[test]
-    fn test_make_place_for_line_string() {
-        let place = super::make_place(BICYCLE_ROAD).unwrap();
-        assert_eq!(place.source, "atp/bern_ch");
-        assert_eq!(
-            tags(&place),
-            [("bicycle_road", "yes"), ("highway", "residential"),]
-        );
+    fn test_make_place_for_road() {
+        assert!(super::make_place(BICYCLE_ROAD).is_none());
     }
 }
 

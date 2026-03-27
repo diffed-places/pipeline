@@ -10,7 +10,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::thread;
 
-use crate::place::{ParquetWriter, Place};
+use crate::{
+    MatchMask,
+    place::{ParquetWriter, Place},
+};
 
 pub fn assemble(
     store: &dyn FeatureStore,
@@ -49,19 +52,25 @@ fn assemble_nodes(
 ) -> Result<()> {
     (0..store.node_count()).into_par_iter().try_for_each(|i| {
         if let Some(node) = store.get_nth_node(i) {
-            let coord = Coord {
-                x: node.lon_e7 as f64 * 1e-7,
-                y: node.lat_e7 as f64 * 1e-7,
-            };
-            let source = String::from("n");
-            let tags = node
-                .tags
-                .chunks_exact(2)
-                .map(|c| (c[0].clone(), c[1].clone()))
-                .collect();
-            if let Some(mut place) = Place::new(&coord, source, tags) {
-                place.osm_id = node.id;
-                out.send(place)?;
+            let mut mask = MatchMask::default();
+            for c in node.tags.chunks_exact(2) {
+                mask.add_tag(&c[0], &c[1]);
+            }
+            if !mask.is_empty() {
+                let coord = Coord {
+                    x: node.lon_e7 as f64 * 1e-7,
+                    y: node.lat_e7 as f64 * 1e-7,
+                };
+                let source = String::from("n");
+                let tags = node
+                    .tags
+                    .chunks_exact(2)
+                    .map(|c| (c[0].clone(), c[1].clone()))
+                    .collect();
+                if let Some(mut place) = Place::new(&coord, source, mask, tags) {
+                    place.osm_id = node.id;
+                    out.send(place)?;
+                }
             }
         };
         progress_bar.inc(1);
@@ -78,29 +87,35 @@ fn assemble_ways(
         if let Some(way) = store.get_nth_way(i)
             && !way.tags.is_empty()
         {
-            let mut coords = Vec::<geo::Coord>::with_capacity(way.nodes.len());
-            for node_id in way.nodes.iter() {
-                if let Some(c) = store.get_coord(*node_id) {
-                    coords.push(c);
-                }
+            let mut mask = MatchMask::default();
+            for c in way.tags.chunks_exact(2) {
+                mask.add_tag(&c[0], &c[1]);
             }
+            if !mask.is_empty() {
+                let mut coords = Vec::<geo::Coord>::with_capacity(way.nodes.len());
+                for node_id in way.nodes.iter() {
+                    if let Some(c) = store.get_coord(*node_id) {
+                        coords.push(c);
+                    }
+                }
 
-            // In theory, OpenStreetMap ways can self-intersect.
-            // In practice, this is super rare and checked by
-            // QA tools such as Osmose. So, we don’t really care
-            // as long as the pipeline doesn’t crash. If this ever
-            // becomes a real problem, we could use the geos crate.
-            let linestring = LineString::new(coords);
-            if let Some(centroid) = linestring.centroid() {
-                let tags: Vec<(String, String)> = way
-                    .tags
-                    .chunks_exact(2)
-                    .map(|c| (c[0].clone(), c[1].clone()))
-                    .collect();
-                let source = String::from("w");
-                if let Some(mut place) = Place::new(&centroid.0, source, tags) {
-                    place.osm_id = way.id;
-                    out.send(place)?;
+                // In theory, OpenStreetMap ways can self-intersect.
+                // In practice, this is super rare and checked by
+                // QA tools such as Osmose. So, we don’t really care
+                // as long as the pipeline doesn’t crash. If this ever
+                // becomes a real problem, we could use the geos crate.
+                let linestring = LineString::new(coords);
+                if let Some(centroid) = linestring.centroid() {
+                    let tags: Vec<(String, String)> = way
+                        .tags
+                        .chunks_exact(2)
+                        .map(|c| (c[0].clone(), c[1].clone()))
+                        .collect();
+                    let source = String::from("w");
+                    if let Some(mut place) = Place::new(&centroid.0, source, mask, tags) {
+                        place.osm_id = way.id;
+                        out.send(place)?;
+                    }
                 }
             }
         }
@@ -154,6 +169,7 @@ fn write_places(
 #[cfg(test)]
 mod tests {
     use super::{assemble_nodes, assemble_ways};
+    use crate::MatchMask;
     use crate::osm::{Node, Way, tests::MockFeatureStore};
     use crate::place::Place;
     use anyhow::{Ok, Result};
@@ -165,7 +181,7 @@ mod tests {
         let store = MockFeatureStore::new(
             vec![Node {
                 id: 12345,
-                tags: vec![String::from("a"), String::from("aa")],
+                tags: vec![String::from("shop"), String::from("supermarket")],
                 lon_e7: 11_000_000_0,
                 lat_e7: 12_000_000_0,
             }],
@@ -180,7 +196,8 @@ mod tests {
         let mut want = Place::new(
             &geo::Coord { x: 11.0, y: 12.0 },
             String::from("n"),
-            vec![(String::from("a"), String::from("aa"))],
+            MatchMask::SHOP,
+            vec![(String::from("shop"), String::from("supermarket"))],
         )
         .expect("cannot construct wanted Place");
         want.osm_id = 12345;
@@ -209,7 +226,7 @@ mod tests {
             vec![Way {
                 id: 3,
                 nodes: vec![1, 2, 666],
-                tags: vec![String::from("foo"), String::from("bar")],
+                tags: vec![String::from("natural"), String::from("tree_row")],
             }],
             vec![],
         );
@@ -221,7 +238,8 @@ mod tests {
         let mut want = Place::new(
             &geo::Coord { x: 60.0, y: 30.0 }, // centroid
             String::from("w"),
-            vec![(String::from("foo"), String::from("bar"))],
+            MatchMask::SHRUBBERY,
+            vec![(String::from("natural"), String::from("tree_row"))],
         )
         .expect("cannot construct wanted Place");
         want.osm_id = 3;

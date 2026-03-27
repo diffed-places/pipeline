@@ -259,7 +259,7 @@ mod writer {
     use super::{
         Coverage, S2_CELL_ID_SHIFT, S2_GRANULARITY_LEVEL, is_wikidata_key, parse_wikidata_ids,
     };
-    use crate::PROGRESS_BAR_STYLE;
+    use crate::{MatchMask, PROGRESS_BAR_STYLE};
     use anyhow::{Ok, Result, anyhow};
     use ext_sort::{ExternalSorter, ExternalSorterBuilder, buffer::LimitedBufferBuilder};
     use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
@@ -354,13 +354,17 @@ mod writer {
         let file_metadata = metadata.file_metadata();
         let schema = file_metadata.schema();
         let s2_cell_id_column = column_index("s2_cell_id", schema)?;
+        let mask_column = column_index("mask", schema)?;
         // let source_column = column_index("source", schema)?;
         let tags_column = column_index("tags", schema)?;
         let num_row_groups = reader.num_row_groups();
         let num_rows: i64 = file_metadata.num_rows();
         let num_rows: u64 = if num_rows < 0 { 0 } else { num_rows as u64 };
 
-        let large_radius = meters_to_chord_angle(100.0);
+        const TINY_MASK: u16 = MatchMask::SHRUBBERY.0 | MatchMask::STREET_FURNITURE.0;
+
+        let large_radius = meters_to_chord_angle(800.0);
+        let medium_radius = meters_to_chord_angle(400.0);
         let small_radius = meters_to_chord_angle(10.0);
         let coverer = RegionCoverer {
             max_cells: 8,
@@ -395,14 +399,16 @@ mod writer {
                     let row = row?;
                     let s2_cell = Cell::from(CellID(row.get_ulong(s2_cell_id_column)?));
                     // let source = row.get_string(source_column)?;
+
+                    let mask = row.get_ushort(mask_column)?;
+                    let is_tiny = (mask & !TINY_MASK) == 0;
+                    let mut radius = if is_tiny { small_radius } else { medium_radius };
+
                     let tags = row.get_map(tags_column)?.entries();
-                    let mut radius = small_radius;
                     for (key, value) in tags.iter() {
                         use parquet::record::Field::Str;
                         if let (Str(key), Str(value)) = (key, value) {
                             radius = radius.max(match (key.as_ref(), value.as_ref()) {
-                                ("shop", _) => large_radius,
-                                ("tourism", _) => large_radius,
                                 ("public_transport", "platform") => large_radius,
                                 ("railway", "platform") => large_radius,
                                 (_, _) => small_radius,
