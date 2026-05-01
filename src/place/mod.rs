@@ -3,7 +3,9 @@ use deepsize::DeepSizeOf;
 use geo::Coord;
 use serde::{Deserialize, Serialize};
 
+mod s2_row_group_index;
 mod writer;
+pub use s2_row_group_index::S2RowGroupIndex;
 pub use writer::ParquetWriter;
 
 #[derive(Debug, DeepSizeOf, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
