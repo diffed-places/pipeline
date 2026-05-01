@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 mod atp;
 mod coverage;
+mod diff_places;
 mod osm;
 mod place;
 mod u64_table;
@@ -11,6 +12,7 @@ mod u64_table;
 // Re-exported for main.rs.
 pub use atp::import_atp;
 pub use coverage::build_coverage;
+pub use diff_places::diff_places;
 pub use osm::import_osm;
 
 #[cfg(fuzzing)]
