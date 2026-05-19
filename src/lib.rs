@@ -1,6 +1,8 @@
 use deepsize::DeepSizeOf;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use s2::s1::ChordAngle;
 use serde::{Deserialize, Serialize};
+use std::sync::LazyLock;
 
 mod atp;
 mod coverage;
@@ -74,6 +76,9 @@ impl MatchMask {
     pub const FUEL: MatchMask = MatchMask(1 << 6);
     pub const SHRUBBERY: MatchMask = MatchMask(1 << 7);
     pub const STREET_FURNITURE: MatchMask = MatchMask(1 << 8);
+
+    /// To compute match_distance for large objects such as railway platforms.
+    const LARGE: MatchMask = MatchMask(1 << 9);
 
     pub fn is_empty(&self) -> bool {
         self.0 == 0
@@ -190,9 +195,10 @@ impl MatchMask {
             ("power", _) => Self::STREET_FURNITURE.0,
 
             ("public_transport", "no") => 0,
+            ("public_transport", "platform") => Self::TRANSIT.0 | Self::LARGE.0,
             ("public_transport", _) => Self::TRANSIT.0,
 
-            ("railway", "platform") => Self::TRANSIT.0,
+            ("railway", "platform") => Self::TRANSIT.0 | Self::LARGE.0,
 
             ("school", "no") => 0,
             ("school", _) => Self::SCHOOL.0,
@@ -204,8 +210,8 @@ impl MatchMask {
             ("tourism", "apartment") => Self::LODGING.0,
             ("tourism", "apartments") => Self::LODGING.0,
             ("tourism", "cabin") => Self::LODGING.0,
-            ("tourism", "camp_site") => Self::LODGING.0,
-            ("tourism", "caravan_site") => Self::LODGING.0,
+            ("tourism", "camp_site") => Self::LODGING.0 | Self::LARGE.0,
+            ("tourism", "caravan_site") => Self::LODGING.0 | Self::LARGE.0,
             ("tourism", "guest_house") => Self::LODGING.0,
             ("tourism", "hostel") => Self::LODGING.0,
             ("tourism", "hotel") => Self::LODGING.0,
@@ -219,8 +225,45 @@ impl MatchMask {
         }
     }
 
-    #[allow(unused)] // TODO: Remove attribute once we use it.
+    #[inline]
     pub fn intersects(&self, other: &Self) -> bool {
-        (self.0 | other.0) != 0
+        (self.0 & other.0) != 0
+    }
+}
+
+fn match_distance(mask: &MatchMask) -> ChordAngle {
+    const SMALL_BITS: u16 = MatchMask::SHRUBBERY.0 | MatchMask::STREET_FURNITURE.0;
+    let has_only_small_bits = (mask.0 & SMALL_BITS) == mask.0 && (mask.0 & SMALL_BITS) != 0;
+    if has_only_small_bits {
+        *SMALL_DISTANCE
+    } else if mask.intersects(&MatchMask::LARGE) {
+        *LARGE_DISTANCE
+    } else {
+        *MEDIUM_DISTANCE
+    }
+}
+
+static SMALL_DISTANCE: LazyLock<ChordAngle> = LazyLock::new(|| meters_to_chord_angle(10.0));
+static MEDIUM_DISTANCE: LazyLock<ChordAngle> = LazyLock::new(|| meters_to_chord_angle(400.0));
+static LARGE_DISTANCE: LazyLock<ChordAngle> = LazyLock::new(|| meters_to_chord_angle(1000.0));
+
+fn meters_to_chord_angle(radius_meters: f64) -> ChordAngle {
+    use s2::s1::angle::{Angle, Rad};
+    const EARTH_RADIUS_METERS: f64 = 6_371_000.0;
+    ChordAngle::from(Angle::from(Rad(radius_meters / EARTH_RADIUS_METERS)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_match_distance() {
+        assert!(match_distance(&MatchMask::SHRUBBERY) < match_distance(&MatchMask::RESTAURANT));
+
+        let mut mask = MatchMask::default();
+        mask.add_tag("amenity", "bench");
+        mask.add_tag("shop", "yes");
+        assert!(match_distance(&mask) == match_distance(&MatchMask::RESTAURANT));
     }
 }
