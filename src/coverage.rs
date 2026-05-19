@@ -267,13 +267,7 @@ mod writer {
     use parquet::record::RowAccessor;
     use parquet::schema::types::Type;
     use rayon::prelude::*;
-    use s2::{
-        cap::Cap,
-        cell::Cell,
-        cellid::CellID,
-        region::RegionCoverer,
-        s1::{Angle, ChordAngle},
-    };
+    use s2::{cap::Cap, cell::Cell, cellid::CellID, region::RegionCoverer};
     use std::collections::HashSet;
     use std::fs::{File, remove_file, rename};
     use std::hash::{BuildHasherDefault, Hasher};
@@ -360,12 +354,6 @@ mod writer {
         let num_row_groups = reader.num_row_groups();
         let num_rows: i64 = file_metadata.num_rows();
         let num_rows: u64 = if num_rows < 0 { 0 } else { num_rows as u64 };
-
-        const TINY_MASK: u16 = MatchMask::SHRUBBERY.0 | MatchMask::STREET_FURNITURE.0;
-
-        let large_radius = meters_to_chord_angle(800.0);
-        let medium_radius = meters_to_chord_angle(400.0);
-        let small_radius = meters_to_chord_angle(10.0);
         let coverer = RegionCoverer {
             max_cells: 8,
             min_level: S2_GRANULARITY_LEVEL,
@@ -399,31 +387,24 @@ mod writer {
                     let row = row?;
                     let s2_cell = Cell::from(CellID(row.get_ulong(s2_cell_id_column)?));
                     // let source = row.get_string(source_column)?;
-
-                    let mask = row.get_ushort(mask_column)?;
-                    let is_tiny = (mask & !TINY_MASK) == 0;
-                    let mut radius = if is_tiny { small_radius } else { medium_radius };
-
-                    let tags = row.get_map(tags_column)?.entries();
-                    for (key, value) in tags.iter() {
-                        use parquet::record::Field::Str;
-                        if let (Str(key), Str(value)) = (key, value) {
-                            radius = radius.max(match (key.as_ref(), value.as_ref()) {
-                                ("public_transport", "platform") => large_radius,
-                                ("railway", "platform") => large_radius,
-                                (_, _) => small_radius,
-                            });
-                            if is_wikidata_key(key) {
-                                for id in parse_wikidata_ids(value) {
-                                    out_wikidata_ids.send(id)?;
-                                }
-                            }
-                        }
-                    }
+                    let mask = MatchMask(row.get_ushort(mask_column)?);
+                    let radius = crate::match_distance(&mask);
                     let cap = Cap::from_center_chordangle(&s2_cell.center(), &radius);
                     for cell_id in coverer.covering(&cap).0.into_iter() {
                         out_cells.send(cell_id)?;
                     }
+                    let tags = row.get_map(tags_column)?.entries();
+                    for (key, value) in tags.iter() {
+                        use parquet::record::Field::Str;
+                        if let (Str(key), Str(value)) = (key, value)
+                            && is_wikidata_key(key)
+                        {
+                            for id in parse_wikidata_ids(value) {
+                                out_wikidata_ids.send(id)?;
+                            }
+                        }
+                    }
+
                     bar.inc(1);
                 }
 
@@ -441,12 +422,6 @@ mod writer {
             }
         }
         Err(anyhow!("column \"{}\" not found", name))
-    }
-
-    fn meters_to_chord_angle(radius_meters: f64) -> ChordAngle {
-        use s2::s1::angle::Rad;
-        const EARTH_RADIUS_METERS: f64 = 6_371_000.0;
-        ChordAngle::from(Angle::from(Rad(radius_meters / EARTH_RADIUS_METERS)))
     }
 
     /// Builds a spatial coverage file from a stream of s2::CellIDs.
