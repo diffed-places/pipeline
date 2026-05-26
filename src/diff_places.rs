@@ -1,9 +1,10 @@
 use crate::places::{Place, PlaceIndex};
 use crate::s2_util::MergedCellRanges;
-use crate::{make_progress_bar, match_distance};
+use crate::{MatchMask, make_progress_bar, match_distance};
 use anyhow::Result;
 use indicatif::MultiProgress;
-use s2::{cap::Cap, cell::Cell, cellid::CellID, region::RegionCoverer};
+use rayon::prelude::*;
+use s2::{cap::Cap, cell::Cell, cellid::CellID, point::Point, region::RegionCoverer};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -37,28 +38,48 @@ pub fn diff_places(
     let num_atp_features = AtomicU64::new(0);
     let num_candidates = AtomicU64::new(0);
 
-    let region = CellID::from_token("479ab6e4"); // Rapperswil SG, Switzerland
-    let mut iter = atp_places.query(
-        region.range_min()..=region.range_max(),
-        crate::MatchMask::SHOP,
-    )?;
-    for place in &mut iter {
-        let place: &Place = place?;
-        num_atp_features.fetch_add(1, Ordering::Relaxed);
-        let s2_cell = Cell::from(CellID(place.s2_cell_id));
-        let center = s2_cell.center();
-        let radius = match_distance(&place.mask);
-        let cap = Cap::from_center_chordangle(&center, &radius);
-        let covering = coverer.covering(&cap);
-        for (lo, hi) in MergedCellRanges::new(covering) {
-            for candidate in &mut osm_places.query(lo..=hi, place.mask)? {
-                let candidate = candidate?;
-                num_candidates.fetch_add(1, Ordering::Relaxed);
-                let candidate_center =
-                    s2::point::Point(CellID(candidate.s2_cell_id).raw_point().normalize());
-                let _distance = center.distance(&candidate_center).rad() * 6_371_000.0;
-            }
-        }
+    for group in atp_places.scan_row_groups() {
+        // Each group is processed by the Rayon thread pool in parallel,
+        // but the outer loop is sequential — so nearby places (within a
+        // group) always go to nearby workers, preserving spatial locality.
+        group?.par_iter().try_for_each(|place| {
+            progress_bar.inc(1);
+            if let Some(matcher) = create_matcher(place) {
+                num_atp_features.fetch_add(1, Ordering::Relaxed);
+                let s2_cell = Cell::from(CellID(place.s2_cell_id));
+                let center = s2_cell.center();
+                let radius = match_distance(&place.mask);
+                let cap = Cap::from_center_chordangle(&center, &radius);
+                let covering = coverer.covering(&cap);
+                let mut best_candidate: Option<Place> = None;
+                let mut best_score: f64 = 0.0;
+                for (lo, hi) in MergedCellRanges::new(covering) {
+                    let mut iter = osm_places.query(lo..=hi, place.mask)?;
+                    let mut bc: Option<&Place> = None;
+                    for candidate in &mut iter {
+                        num_candidates.fetch_add(1, Ordering::Relaxed);
+                        let candidate = candidate?;
+                        let score = matcher.score(candidate);
+                        if score > best_score {
+                            bc = Some(candidate);
+                            best_score = score;
+                        }
+                    }
+                    if let Some(b) = bc {
+                        best_candidate = Some(b.deep_clone());
+                    }
+                }
+                if let Some(best_candidate) = best_candidate
+                    && false
+                {
+                    println!(
+                        "score={} place={:?} best_candidate={:?}",
+                        best_score, place, best_candidate
+                    );
+                }
+            };
+            Ok::<(), anyhow::Error>(())
+        })?;
     }
 
     let cache_stats = osm_places.cache_stats();
@@ -76,4 +97,50 @@ pub fn diff_places(
     );
 
     Ok(out_path)
+}
+
+// TODO: Figure out how to best model matchers for different types, such as trees vs shops.
+fn distance(pt: &Point, place: &Place) -> f64 {
+    let pt2 = Point(CellID(place.s2_cell_id).raw_point().normalize());
+    pt.distance(&pt2).rad() * 6_371_000.0
+}
+
+fn distance_score(pt: &Point, place: &Place, max_meters: f64) -> f64 {
+    let dist = distance(pt, place);
+    if dist <= max_meters {
+        (max_meters - dist) / max_meters
+    } else {
+        0.0
+    }
+}
+
+/// Trait for objects that can score a `Place`.
+pub trait Matcher {
+    /// Returns a score between 0.0 and 1.0 indicating how well the place matches.
+    fn score(&self, place: &Place) -> f64;
+}
+
+pub fn create_matcher(place: &Place) -> Option<Box<dyn Matcher + '_>> {
+    if place.mask.intersects(&MatchMask::SHOP) {
+        Some(Box::new(ShopMatcher::new(place)))
+    } else {
+        None
+    }
+}
+
+pub struct ShopMatcher {
+    center: Point,
+}
+
+impl ShopMatcher {
+    fn new(place: &Place) -> ShopMatcher {
+        let center = Cell::from(CellID(place.s2_cell_id)).center();
+        ShopMatcher { center }
+    }
+}
+
+impl Matcher for ShopMatcher {
+    fn score(&self, p: &Place) -> f64 {
+        distance_score(&self.center, p, 2000.0)
+    }
 }

@@ -39,6 +39,16 @@ impl Place {
             tags,
         })
     }
+
+    pub fn deep_clone(&self) -> Self {
+        Place {
+            s2_cell_id: self.s2_cell_id,
+            osm_id: self.osm_id,
+            source: self.source.clone(),
+            mask: self.mask,
+            tags: self.tags.clone(),
+        }
+    }
 }
 
 #[cfg(test)]

@@ -1,13 +1,9 @@
 use arrow::array::{Array, MapArray, RecordBatch, StringArray, UInt16Array, UInt64Array};
 use arrow::compute::concat_batches;
 use lru::LruCache;
-
-// TODO: Replace OnceCell by OnceLock when https://github.com/rust-lang/rust/issues/109737 is done.
 use once_cell::sync::OnceCell;
-
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::statistics::Statistics;
-use rayon::prelude::*;
 use s2::cellid::CellID;
 use std::fs::File;
 use std::num::NonZeroUsize;
@@ -17,6 +13,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::{MatchMask, places::Place};
+
+// TODO: Replace once_cell::sync::OnceCell by std::sync::OnceLock.
+// However, this needs get_or_try_init to be stabilised on std::sync::OnceLock.
+// https://github.com/rust-lang/rust/issues/109737
 
 // ============================================================================
 // Cache hit/miss counters
@@ -56,13 +56,35 @@ struct RowGroupInfo {
 }
 
 // ============================================================================
-// Cache design  (see earlier comments for full explanation)
+// Cache design
 //
-// LRU maps  rg_index → Arc<OnceCell<Arc<Vec<Place>>>>
+// The LRU maps  rg_index → Arc<CacheSlot>
+// where         CacheSlot = OnceCell<Arc<Vec<Place>>>
+//
+//  outer Arc     — lets multiple threads share the same slot without holding
+//                  the LRU Mutex; cloning it is a single atomic increment.
+//
+//  OnceCell      — guarantees the row group is decoded exactly once, even
+//                  when many threads request the same cold slot concurrently.
+//                  The first thread to call get_or_try_init runs the decoder;
+//                  every other thread blocks inside that call until decoding
+//                  finishes, then reads the result without re-doing any work.
+//                  On a warm hit (cell already set) get_or_try_init is a
+//                  single atomic load — no locking, no blocking.
+//
+//  inner Arc     — lets iterators keep Vec<Place> alive even after the LRU
+//                  evicts the slot. An iterator holds its own Arc clone, so
+//                  eviction only drops the LRU's copy; the data is freed only
+//                  when the last iterator referencing it is dropped.
+//
+// Thread protocol for a cache miss:
+//   1. Lock LRU (briefly) → get-or-insert an Arc<CacheSlot> → unlock.
+//      The LRU Mutex is never held during disk I/O.
+//   2. Call slot.get_or_try_init(decode). One thread decodes; all racing
+//      threads block here and share the result when it is ready.
+//   3. Clone the inner Arc<Vec<Place>> from the now-initialised cell.
 // ============================================================================
 
-// TODO: Replace OnceCell by OnceLock after the try_ methods are stable.
-// https://github.com/rust-lang/rust/issues/109737
 type CacheSlot = OnceCell<Arc<Vec<Place>>>;
 
 // ============================================================================
@@ -136,7 +158,7 @@ impl PlaceIndex {
     }
 
     // -----------------------------------------------------------------------
-    // Sequential API
+    // Query API
     // -----------------------------------------------------------------------
 
     /// Returns a sequential iterator over Places with `s2_cell_id ∈ range`
@@ -155,58 +177,17 @@ impl PlaceIndex {
         })
     }
 
-    /// Returns a sequential iterator over every Place in the file.
-    #[allow(unused)] // TODO: Remove attribute once we use it.
-    pub fn scan(self: &Arc<Self>) -> FullScanIter {
-        FullScanIter {
-            index: Arc::clone(self),
-            group_idx: 0,
-            current: None,
-        }
+    /// Iterates over row groups, yielding each as an Arc<Vec<Place>>.
+    /// The caller processes each chunk, typically in parallel using Rayon.
+    /// Rayon sees slices of places with high spatial locality because
+    /// our Parquet files are spatially sorted (by s2 cell id).
+    pub fn scan_row_groups(
+        self: &Arc<Self>,
+    ) -> impl Iterator<Item = anyhow::Result<Arc<Vec<Place>>>> + '_ {
+        self.groups.iter().map(|group| self.load_row_group(group))
     }
 
-    // -----------------------------------------------------------------------
-    // Parallel API
-    // -----------------------------------------------------------------------
-
-    /// Parallel version of `query`. Each segment (row-group slice) is
-    /// processed independently by Rayon.
-    #[allow(unused)] // TODO: Remove attribute once we use it.
-    pub fn query_par(
-        &self,
-        range: RangeInclusive<CellID>,
-        query_mask: MatchMask,
-    ) -> anyhow::Result<ParPlaceIter> {
-        let (segments, query_mask) = self.build_segments(range, query_mask)?;
-        Ok(ParPlaceIter {
-            segments,
-            query_mask,
-        })
-    }
-
-    /// Parallel version of `scan`. Row groups are loaded concurrently
-    /// (each decoded once via the shared cache) and iterated in parallel.
-    #[allow(unused)] // TODO: Remove attribute once we use it.
-    pub fn scan_par(self: &Arc<Self>) -> ParPlaceIter {
-        let segments: Vec<Segment> = self
-            .groups
-            .iter()
-            .filter_map(|group| {
-                let places = self.load_row_group(group).ok()?;
-                let end = places.len();
-                Some((places, 0, end))
-            })
-            .collect();
-        ParPlaceIter {
-            segments,
-            query_mask: MatchMask(0xFFFF),
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Shared segment-building logic used by both query() and query_par()
-    // -----------------------------------------------------------------------
-
+    /// Builds segments on behalf of query().
     fn build_segments(
         &self,
         range: RangeInclusive<CellID>,
@@ -310,8 +291,8 @@ impl<'iter> Iterator for &'iter mut PlaceIter {
                 .get(self.seg_idx)
                 .map(|(a, s, e)| (a.as_ref(), *s, *e))?;
 
-            let abs = start + self.row_idx;
-            if abs >= end {
+            let pos = start + self.row_idx;
+            if pos >= end {
                 self.seg_idx += 1;
                 self.row_idx = 0;
                 continue;
@@ -321,97 +302,12 @@ impl<'iter> Iterator for &'iter mut PlaceIter {
 
             // SAFETY: `places` is borrowed from the Arc inside `self.segments`,
             // which is owned by `self` and therefore lives for `'iter`.
-            // `abs` is within [start, end) which was verified against
+            // `pos` is within [start, end) which was verified against
             // places.len() when the segment was constructed in `build_segments`.
-            let place: &'iter Place = unsafe { &*(places.get_unchecked(abs) as *const Place) };
+            let place: &'iter Place = unsafe { &*(places.get_unchecked(pos) as *const Place) };
 
             if place.mask.intersects(&self.query_mask) {
                 return Some(Ok(place));
-            }
-        }
-    }
-}
-
-// ============================================================================
-// Parallel iterator — owns the segments, yields &Place refs
-// ============================================================================
-//
-// `ParPlaceIter` owns the `Vec<Segment>` (each element holds an `Arc<Vec<Place>>`),
-// so the Places are guaranteed live for `'self`. The `par_iter` method exposes
-// them as a `ParallelIterator<Item = &Place>` using the same raw-pointer lifetime
-// extension as the sequential `PlaceIter`.
-
-#[allow(unused)] // TODO: Remove attribute once we use it.
-pub struct ParPlaceIter {
-    segments: Vec<Segment>,
-    query_mask: MatchMask,
-}
-
-impl ParPlaceIter {
-    /// Returns a Rayon `ParallelIterator` over matching `&Place` references.
-    /// Splits across segments (row-group slices); Rayon further subdivides
-    /// within each slice as it sees fit.
-    #[allow(unused)] // TODO: Remove attribute once we use it.
-    pub fn par_iter(&self) -> impl ParallelIterator<Item = &Place> {
-        let query_mask = self.query_mask;
-        self.segments
-            .par_iter()
-            .flat_map(|(places, start, end)| {
-                // SAFETY: `places` is an Arc<Vec<Place>> stored in `self.segments`.
-                // `self` lives for the duration of the returned iterator (the caller
-                // holds `&self`). The slice [*start..*end] was bounds-checked in
-                // `build_segments`. No mutable access to the data exists.
-                let slice: &[Place] =
-                    unsafe { std::slice::from_raw_parts(places.as_ptr().add(*start), end - start) };
-                slice.par_iter()
-            })
-            .filter(move |p| p.mask.intersects(&query_mask))
-    }
-}
-
-// ============================================================================
-// Sequential full-scan iterator — yields anyhow::Result<&'iter Place>
-// ============================================================================
-
-pub struct FullScanIter {
-    index: Arc<PlaceIndex>,
-    group_idx: usize,
-    current: Option<(Arc<Vec<Place>>, usize)>,
-}
-
-impl FullScanIter {
-    fn advance_group(&mut self) -> Option<()> {
-        if self.group_idx >= self.index.groups.len() {
-            return None;
-        }
-        let group = &self.index.groups[self.group_idx];
-        let places = self.index.load_row_group(group).ok()?;
-        self.current = Some((places, 0));
-        self.group_idx += 1;
-        Some(())
-    }
-}
-
-impl<'iter> Iterator for &'iter mut FullScanIter {
-    type Item = anyhow::Result<&'iter Place>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            match &mut self.current {
-                Some((places, idx)) => {
-                    if *idx < places.len() {
-                        let i = *idx;
-                        *idx += 1;
-                        // SAFETY: same argument as in PlaceIter.
-                        let place: &'iter Place =
-                            unsafe { &*(places.get_unchecked(i) as *const Place) };
-                        return Some(Ok(place));
-                    }
-                    self.current = None;
-                }
-                None => {
-                    self.advance_group()?;
-                }
             }
         }
     }
@@ -528,6 +424,10 @@ fn extract_u64_stats(stats: Option<&Statistics>) -> anyhow::Result<(u64, u64)> {
     }
 }
 
+// ============================================================================
+// Tests
+// ============================================================================
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -582,49 +482,16 @@ mod tests {
     }
 
     #[test]
-    fn test_query_par() {
+    fn test_scan_row_groups() {
         let index = load_test_index();
-        let count = |lo, hi, mask| {
-            let results = index
-                .query_par(CellID(lo)..=CellID(hi), mask)
-                .expect("query_par failed");
-            results
-                .par_iter()
-                .inspect(|place| check_place(place))
-                .count()
-        };
-        assert_eq!(count(7, 42, MatchMask::STREET_FURNITURE), 0);
-        assert_eq!(count(0, 5159714166772063677, MatchMask::SHOP), 5);
-        let stats = index.cache_stats();
-        assert_eq!(stats, CacheStats { hits: 0, misses: 1 });
-        assert_eq!(stats.hit_rate(), Some(0.0));
-    }
-
-    #[test]
-    fn test_scan() {
-        let index = load_test_index();
-        let num_places = index
-            .scan()
-            .inspect(|p| check_place(p.as_ref().expect("scan failed")))
-            .count();
-        assert_eq!(num_places, 7);
-        assert_eq!(index.cache_stats(), CacheStats { hits: 0, misses: 1 });
-        assert_eq!(index.cache_stats().hit_rate(), Some(0.0));
-    }
-
-    #[test]
-    fn test_scan_par() {
-        let index = load_test_index();
-        let num_places = index
-            .scan_par()
-            .par_iter()
-            .inspect(|p| {
-                check_place(&p);
-            })
-            .count();
-        assert_eq!(num_places, 7);
-        assert_eq!(index.cache_stats(), CacheStats { hits: 0, misses: 1 });
-        assert_eq!(index.cache_stats().hit_rate(), Some(0.0));
+        let mut place_count = 0;
+        for group in index.scan_row_groups() {
+            for p in group.expect("scan_row_groups failed").iter() {
+                check_place(p);
+                place_count += 1;
+            }
+        }
+        assert_eq!(place_count, 7);
     }
 
     fn check_place(place: &Place) {
