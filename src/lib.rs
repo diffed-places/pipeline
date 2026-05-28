@@ -15,7 +15,7 @@ mod u64_table;
 // Re-exported for main.rs.
 pub use atp::import_atp;
 pub use coverage::build_coverage;
-pub use diff_places::diff_places;
+pub use diff_places::suggest_edits;
 pub use osm::import_osm;
 
 #[cfg(fuzzing)]

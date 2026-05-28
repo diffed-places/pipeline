@@ -9,7 +9,7 @@ use rustls::{ClientConfig, RootCertStore};
 use std::fs::create_dir;
 use webpki_roots::TLS_SERVER_ROOTS;
 
-use diffed_places_pipeline::{build_coverage, diff_places, import_atp, import_osm};
+use diffed_places_pipeline::{build_coverage, import_atp, import_osm, suggest_edits};
 
 #[derive(Parser)]
 #[command(name = "diffed-places-pipeline")]
@@ -46,7 +46,7 @@ fn main() -> Result<()> {
 
             let coverage = build_coverage(&atp, &progress, workdir)?;
             let osm = import_osm(&coverage, &progress, workdir)?;
-            let _diff = diff_places(&coverage, &atp, &osm, &progress, workdir)?;
+            let _suggested_edits = suggest_edits(&coverage, &atp, &osm, &progress, workdir)?;
             Ok(())
         }
         None => Err(anyhow!("no subcommand given")),

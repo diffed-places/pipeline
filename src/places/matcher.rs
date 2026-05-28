@@ -1,10 +1,13 @@
 use crate::{MatchMask, places::Place};
 use s2::{cell::Cell, cellid::CellID, point::Point};
+use std::collections::HashMap;
 
 /// Trait for objects that can score a `Place`.
 pub trait Matcher {
     /// Returns a score between 0.0 and 1.0 indicating how well the place matches.
     fn score(&self, place: &Place) -> f64;
+
+    fn suggest_edit(&self, osm_feature: &Place) -> Option<Place>;
 }
 
 pub fn create_matcher(place: &Place) -> Option<Box<dyn Matcher + '_>> {
@@ -37,17 +40,18 @@ fn parse_wikidata_id(s: &str) -> Option<u64> {
     digits.parse::<u64>().ok()
 }
 
-struct ShopMatcher {
+struct ShopMatcher<'a> {
+    atp_place: &'a Place,
     center: Point,
     brand_wikidata: u64,
 }
 
-impl ShopMatcher {
+impl<'a> ShopMatcher<'a> {
     // TODO: For now, we only match based on brand:wikidata.
     // We should also look at names, by computing the token sort ratio,
     // but we should do this in a way that works for CJK. So we need
     // a decent segmenter that works for CJK languages. Maybe Lindera?
-    fn for_place(place: &Place) -> Option<ShopMatcher> {
+    fn for_place(place: &'a Place) -> Option<ShopMatcher<'a>> {
         if !place.mask.intersects(&MatchMask::SHOP) {
             return None;
         }
@@ -62,6 +66,7 @@ impl ShopMatcher {
         if let Some(brand_wikidata) = brand_wikidata {
             let center = Cell::from(CellID(place.s2_cell_id)).center();
             Some(ShopMatcher {
+                atp_place: place,
                 center,
                 brand_wikidata,
             })
@@ -69,9 +74,22 @@ impl ShopMatcher {
             None
         }
     }
+
+    /// Tells whether we trust an AllThePlaces tag enough to suggest an OpenStreetMap edit.
+    /// AllThePlaces mostly propagates whatever comes from spidered websites,
+    /// so we use an allowlist to prevent spamming human OpenStreetMap editors.
+    fn is_atp_tag_trustworthy(key: &str) -> bool {
+        // Before you add entries to this list, please make sure that the quality
+        // is good. To evaluate, look at the diff of workdir/suggested-edits.jsonl
+        // from before and after your change to this code.
+        matches!(
+            key,
+            "email" | "end_date" | "fax" | "opening_hours" | "phone" | "start_date" | "website"
+        )
+    }
 }
 
-impl Matcher for ShopMatcher {
+impl<'a> Matcher for ShopMatcher<'a> {
     fn score(&self, candidate: &Place) -> f64 {
         let mut candidate_brand_wikidata: Option<u64> = None;
         for (k, v) in candidate.tags.iter() {
@@ -87,6 +105,38 @@ impl Matcher for ShopMatcher {
         } else {
             0.0
         }
+    }
+
+    fn suggest_edit(&self, osm_feature: &Place) -> Option<Place> {
+        let osm_tags: HashMap<&str, &str> = osm_feature
+            .tags
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        let tag_edits: Vec<(String, String)> = self
+            .atp_place
+            .tags
+            .iter()
+            .filter(|(key, _atp_value)| Self::is_atp_tag_trustworthy(key))
+            .filter(|(key, atp_value)| {
+                if let Some(osm_value) = osm_tags.get::<str>(key.as_ref()) {
+                    atp_value != osm_value
+                } else {
+                    true // OSM feature has no value yet for this key
+                }
+            })
+            .cloned()
+            .collect();
+        if tag_edits.is_empty() {
+            return None;
+        }
+        Some(Place {
+            s2_cell_id: osm_feature.s2_cell_id,
+            osm_id: osm_feature.osm_id,
+            source: self.atp_place.source.clone(),
+            mask: osm_feature.mask,
+            tags: tag_edits,
+        })
     }
 }
 
