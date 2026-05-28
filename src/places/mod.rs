@@ -51,11 +51,39 @@ impl Place {
             tags: self.tags.clone(),
         }
     }
+
+    pub fn to_geojson(&self) -> geojson::Feature {
+        let s2_cell_id = s2::cellid::CellID(self.s2_cell_id);
+        let lat_lon = s2::latlng::LatLng::from(s2_cell_id);
+        // Let's not emit coordinates with fake micrometer precision.
+        let rounded_lon = (lat_lon.lng.deg() * 1e7).round() / 1e7;
+        let rounded_lat = (lat_lon.lat.deg() * 1e7).round() / 1e7;
+        let point = geo::point!(x: rounded_lon, y: rounded_lat);
+        let id = if self.osm_id > 0 {
+            // TODO: Handle ways and relations.
+            let id_string = format!("node/{}", self.osm_id);
+            Some(geojson::feature::Id::String(id_string))
+        } else {
+            None
+        };
+        geojson::Feature {
+            bbox: None,
+            geometry: Some(geojson::Geometry::from(&point)),
+            id,
+            properties: Some(
+                self.tags
+                    .iter()
+                    .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                    .collect(),
+            ),
+            foreign_members: None,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Place;
+    use super::*;
     use crate::MatchMask;
     use geo::Coord;
 
@@ -74,6 +102,41 @@ mod tests {
         assert_eq!(place.s2_cell_id, 5156122125915201443);
         assert_eq!(place.source, "test/source");
         assert_eq!(place.tags, tags);
+    }
+
+    #[test]
+    fn test_to_geojson() {
+        let p = Coord {
+            x: 7.447_812_3,
+            y: 46.947_980_1,
+        };
+        let source = "test/source".to_string();
+        let tags = vec![
+            ("building".to_string(), "tower".to_string()),
+            ("name:gsw".to_string(), "Zytglogge".to_string()),
+        ];
+        let mut place = Place::new(&p, source, MatchMask::SHOP, tags.clone()).unwrap();
+        place.osm_id = 789;
+        let mut got_geojson = place.to_geojson();
+        let (got_lon, got_lat) = point_coords(got_geojson.geometry.as_ref().unwrap());
+        assert!((got_lon - p.x).abs() < 1e-6);
+        assert!((got_lat - p.y).abs() < 1e-6);
+        got_geojson.geometry = None;
+        let expected_geojson: geojson::Feature = r#"{
+            "type": "Feature",
+            "id": "node/789",
+            "properties": { "building": "tower", "name:gsw": "Zytglogge" }
+        }"#
+        .parse()
+        .unwrap();
+        assert_eq!(got_geojson, expected_geojson);
+    }
+
+    fn point_coords(geometry: &geojson::Geometry) -> (f64, f64) {
+        match &geometry.value {
+            geojson::GeometryValue::Point { coordinates: c } => (c[0], c[1]),
+            _ => panic!("expected a Point geometry"),
+        }
     }
 
     #[test]
