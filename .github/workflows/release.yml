@@ -76,7 +76,7 @@ jobs:
 
       - name: Merge SBOM for container
         id: merge-sbom
-	run: |
+        run: |
           IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           DIGEST=$(cat artifacts/digest.txt)
           TIMESTAMP=${{ steps.commit-info.outputs.timestamp }}
