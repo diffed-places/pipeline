@@ -1,6 +1,6 @@
 use crate::places::{Place, PlaceIndex, create_matcher};
 use crate::s2_util::MergedCellRanges;
-use crate::{make_progress_bar, match_distance};
+use crate::{TileLayer, make_progress_bar, match_distance};
 use anyhow::Result;
 use ext_sort::{ExternalSorter, ExternalSorterBuilder, buffer::mem::MemoryLimitedBufferBuilder};
 use indicatif::{MultiProgress, ProgressBar};
@@ -14,18 +14,36 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::thread;
 
+struct EditWriter {
+    shops: SyncSender<Place>,
+    _infrastructure: SyncSender<Place>,
+    _trees: SyncSender<Place>,
+}
+
+impl EditWriter {
+    fn make_layers(workdir: &Path) -> Vec<TileLayer> {
+        ["shops", "infrastructure", "trees"]
+            .iter()
+            .map(|&s| TileLayer {
+                name: String::from(s),
+                path: workdir.join(String::from(s) + ".jsonl"),
+            })
+            .collect()
+    }
+}
+
 pub fn suggest_edits(
     _coverage: &Path,
     atp: &Path,
     osm: &Path,
     progress: &MultiProgress,
     workdir: &Path,
-) -> Result<PathBuf> {
+) -> Result<Vec<TileLayer>> {
     assert!(workdir.exists());
 
-    let out_path = workdir.join("suggested-edits.jsonl");
-    if out_path.exists() {
-        return Ok(out_path);
+    let layers = EditWriter::make_layers(workdir);
+    if layers.iter().all(|layer| layer.path.exists()) {
+        return Ok(layers);
     }
 
     let atp = PlaceIndex::open(atp, 1)?;
@@ -34,14 +52,30 @@ pub fn suggest_edits(
     let osm = PlaceIndex::open(osm, 32)?; // TODO: More but smaller row groups for OSM.
 
     let mut producer_result = Ok(());
-    let mut num_edits = Ok(0);
+    let mut num_shop_edits = Ok(0);
+    let mut num_infrastructure_edits = Ok(0);
+    let mut num_tree_edits = Ok(0);
     thread::scope(|s| {
-        let (tx, rx) = sync_channel::<Place>(8192);
-        s.spawn(|| producer_result = produce_edits(atp.clone(), osm.clone(), &progress_bar, tx));
-        s.spawn(|| num_edits = write_edits(rx, &out_path, workdir));
+        let (shops_tx, shops_rx) = sync_channel::<Place>(8192);
+        let (infrastructure_tx, infrastructure_rx) = sync_channel::<Place>(8192);
+        let (trees_tx, trees_rx) = sync_channel::<Place>(8192);
+        let writer = EditWriter {
+            shops: shops_tx,
+            _infrastructure: infrastructure_tx,
+            _trees: trees_tx,
+        };
+        s.spawn(|| {
+            producer_result = produce_edits(atp.clone(), osm.clone(), &progress_bar, writer)
+        });
+        s.spawn(|| num_shop_edits = write_edits(shops_rx, &layers[0].path, workdir));
+        s.spawn(|| {
+            num_infrastructure_edits = write_edits(infrastructure_rx, &layers[1].path, workdir)
+        });
+        s.spawn(|| num_tree_edits = write_edits(trees_rx, &layers[2].path, workdir));
     });
     producer_result?;
-    progress_bar.finish_with_message(format!("ATP features → {} suggested OSM edits", num_edits?));
+    let num_edits = num_shop_edits? + num_infrastructure_edits? + num_tree_edits?;
+    progress_bar.finish_with_message(format!("ATP features → {} suggested OSM edits", num_edits));
 
     let cache_stats = osm.cache_stats();
     println!(
@@ -51,14 +85,14 @@ pub fn suggest_edits(
         cache_stats.hit_rate().unwrap_or(0.0) * 100.0
     );
 
-    Ok(out_path)
+    Ok(layers)
 }
 
 fn produce_edits(
     atp: Arc<PlaceIndex>,
     osm: Arc<PlaceIndex>,
     progress_bar: &ProgressBar,
-    out: SyncSender<Place>,
+    out: EditWriter,
 ) -> Result<()> {
     let coverer = RegionCoverer {
         max_cells: 16,
@@ -113,7 +147,8 @@ fn produce_edits(
                                 best_score, place, best_candidate, edit
                             );
                         }
-                        out.send(edit)?;
+                        // TODO: Dispatch to one of {shops, infrastructure, trees}.
+                        out.shops.send(edit)?;
                     }
                 }
             };
