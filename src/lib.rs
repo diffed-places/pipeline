@@ -2,6 +2,7 @@ use deepsize::DeepSizeOf;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use s2::s1::ChordAngle;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::LazyLock;
 
 mod atp;
@@ -254,6 +255,13 @@ fn meters_to_chord_angle(radius_meters: f64) -> ChordAngle {
     use s2::s1::angle::{Angle, Rad};
     const EARTH_RADIUS_METERS: f64 = 6_371_000.0;
     ChordAngle::from(Angle::from(Rad(radius_meters / EARTH_RADIUS_METERS)))
+}
+
+/// A single layer to be rendered into tiles with Tippecanoe.
+/// Instances are passed from `suggest_edits()` to `render_tiles()`.
+pub struct TileLayer {
+    pub name: String,
+    pub path: PathBuf,
 }
 
 #[cfg(test)]

@@ -46,7 +46,7 @@ fn main() -> Result<()> {
 
             let coverage = build_coverage(&atp, &progress, workdir)?;
             let osm = import_osm(&coverage, &progress, workdir)?;
-            let _suggested_edits = suggest_edits(&coverage, &atp, &osm, &progress, workdir)?;
+            let _edits = suggest_edits(&coverage, &atp, &osm, &progress, workdir)?;
             Ok(())
         }
         None => Err(anyhow!("no subcommand given")),
