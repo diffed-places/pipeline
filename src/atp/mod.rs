@@ -135,12 +135,14 @@ fn process_geojson<T: Read>(reader: T, channel: Option<SyncSender<Place>>) -> Re
             continue;
         }
 
-        // Handle individual Features.
-        let trimmed = if let Some((a, _)) = line.split_at_checked(line.len() - 1) {
-            a
+        // Remove any trailing commas.
+        let trimmed = if line.ends_with(',') {
+            &line[..line.len() - 1]
         } else {
             &line
         };
+
+        // Handle individual Features.
         let Some(place) = make_place(trimmed) else {
             continue;
         };
@@ -229,9 +231,9 @@ fn find_point(geojson: &GeoJson) -> Option<Point> {
 
 #[cfg(test)]
 mod tests {
-    use crate::places::Place;
-    use geo::Point;
-    use geojson::GeoJson;
+    use super::*;
+    use indicatif::ProgressDrawTarget;
+    use std::collections::HashMap;
 
     // A point feature for testing.
     const PLAYGROUND: &str = r#"{
@@ -342,6 +344,23 @@ mod tests {
     #[test]
     fn test_make_place_for_road() {
         assert!(super::make_place(BICYCLE_ROAD).is_none());
+    }
+
+    #[test]
+    fn test_process_zip() -> Result<()> {
+        let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        path.push("tests/test_data/alltheplaces.zip");
+        let progress = MultiProgress::with_draw_target(ProgressDrawTarget::hidden());
+        let (tx, rx) = sync_channel(1000);
+        process_zip(&path, &progress, tx)?;
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for place in rx {
+            *counts.entry(place.source).or_insert(0) += 1;
+        }
+        assert_eq!(counts["atp/misenso_ch"], 3);
+        assert_eq!(counts["atp/tchibo"], 1);
+        assert_eq!(counts["atp/winterthur_ch"], 4);
+        Ok(())
     }
 }
 
