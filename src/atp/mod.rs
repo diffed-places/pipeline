@@ -125,9 +125,14 @@ fn process_geojson<T: Read>(reader: T, channel: Option<SyncSender<Place>>) -> Re
         if line.starts_with("{\"type\":\"FeatureCollection\"") {
             let mut json = line;
             json.push_str("]}");
-            let _parsed = json.parse::<geojson::FeatureCollection>()?;
-            // TODO: Collect bounding box and attributes?
-            continue;
+            let parsed = json.parse::<geojson::FeatureCollection>()?;
+            if is_usable_for_osm(&parsed) {
+                continue;
+            } else {
+                // Ignore FeatureCollections that can't be conflated with OSM
+                // according to the AllThePlaces metadata.
+                return Ok(());
+            }
         }
 
         // Handle end of FeatureCollection, last line in file.
@@ -142,7 +147,7 @@ fn process_geojson<T: Read>(reader: T, channel: Option<SyncSender<Place>>) -> Re
             &line
         };
 
-        // Handle individual Features.
+        // Handle individual features.
         let Some(place) = make_place(trimmed) else {
             continue;
         };
@@ -151,6 +156,61 @@ fn process_geojson<T: Read>(reader: T, channel: Option<SyncSender<Place>>) -> Re
         };
     }
     Ok(())
+}
+
+fn is_usable_for_osm(fc: &geojson::FeatureCollection) -> bool {
+    let Some(members) = &fc.foreign_members else {
+        return false;
+    };
+    let Some(attrs) = members.get("dataset_attributes") else {
+        return false;
+    };
+
+    // If AllThePlaces explicitly marks a dataset as OK or Not-OK for OSM,
+    // that takes precedence. This is used when a data source has explicitly
+    // signed a waiver for OSM, or if negotiations were unsuccessful.
+    let use_osm = attrs
+        .get("use:openstreetmap")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    match use_osm {
+        "yes" => return true,
+        "no" => return false,
+        _ => {}
+    }
+
+    // Otherwise, look at the license of the AllThePlaces dataset.
+    // https://osmfoundation.org/wiki/Licence/Licence_Compatibility
+    let license_wikidata = attrs
+        .get("license:wikidata")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    match license_wikidata {
+        "Q6938433" => return true,    // CC0
+        "Q14947546" => return false,  // CC-BY-3.0
+        "Q18199165" => return false,  // CC-BY-SA-4.0
+        "Q20007257" => return false,  // CC-BY-4.0
+        "Q21659044" => return true,   // Unlicense
+        "Q26805818" => return true,   // Italian Open Data License 2.0
+        "Q52555753" => return false,  // CC-BY-3.0-AU
+        "Q80939351" => return true,   // etalab-2.0
+        "Q99891702" => return true,   // OGL-UK-3.0
+        "Q106835855" => return false, // NLOD-2.0
+        "Q115716001" => return false, // opendata.swiss BY-ASK
+        "Q133462062" => return true,  // opendata.swiss OPEN
+        "Q133802534" => return false, // opendata.swiss BY
+        _ => {}
+    }
+
+    // https://github.com/alltheplaces/alltheplaces/blob/master/docs/SPIDER_LINEAGE.md
+    let lineage = attrs
+        .get("spider:lineage")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    match lineage {
+        "S_ATP_BRANDS" => true, // first-party data
+        _ => false,
+    }
 }
 
 fn make_place(geojson: &str) -> Option<Place> {
@@ -361,6 +421,75 @@ mod tests {
         assert_eq!(counts["atp/tchibo"], 1);
         assert_eq!(counts["atp/winterthur_ch"], 4);
         Ok(())
+    }
+
+    #[test]
+    fn test_is_usable_for_osm() {
+        assert_eq!(
+            is_usable_for_osm(&make_dataset(&[("use:openstreetmap", "yes")])),
+            true
+        );
+        assert_eq!(
+            is_usable_for_osm(&make_dataset(&[("use:openstreetmap", "no")])),
+            false
+        );
+        assert_eq!(
+            is_usable_for_osm(&make_dataset(&[
+                ("license", "Creative Commons Zero"),
+                ("license:wikidata", "Q6938433"),
+                ("spider:lineage", "S_ATP_AGGREGATORS"),
+            ])),
+            true
+        );
+        assert_eq!(
+            is_usable_for_osm(&make_dataset(&[
+                ("license", "Creative Commons Zero"),
+                ("license:wikidata", "Q6938433"),
+                ("use:openstreetmap", "no"),
+            ])),
+            false
+        );
+        assert_eq!(
+            is_usable_for_osm(&make_dataset(&[("spider:lineage", "S_ATP_BRANDS")])),
+            true
+        );
+        assert_eq!(
+            is_usable_for_osm(&make_dataset(&[
+                ("license", "Creative Commons Attribution 4.0 International"),
+                ("license:wikidata", "Q20007257"),
+                ("spider:lineage", "S_ATP_BRANDS")
+            ])),
+            false
+        );
+        assert_eq!(
+            is_usable_for_osm(&make_dataset(&[
+                ("license", "Etalab Open License 2.0"),
+                ("license:wikidata", "Q80939351"),
+                ("spider:lineage", "S_ATP_GOVERNMENT")
+            ])),
+            true
+        );
+        assert_eq!(
+            is_usable_for_osm(&make_dataset(&[("spider:lineage", "S_ATP_AGGREGATORS")])),
+            false
+        );
+    }
+
+    fn make_dataset(tags: &[(&str, &str)]) -> geojson::FeatureCollection {
+        let dataset_attributes = tags
+            .iter()
+            .map(|(k, v)| (k.to_string(), serde_json::Value::String(v.to_string())))
+            .collect::<serde_json::Map<_, _>>();
+        let mut foreign_members = serde_json::Map::new();
+        foreign_members.insert(
+            "dataset_attributes".to_string(),
+            serde_json::Value::Object(dataset_attributes),
+        );
+        geojson::FeatureCollection {
+            bbox: None,
+            features: vec![],
+            foreign_members: Some(foreign_members),
+        }
     }
 }
 
