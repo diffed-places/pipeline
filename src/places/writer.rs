@@ -1,7 +1,10 @@
 use super::Place;
 use anyhow::{Ok, Result};
 use arrow::{
-    array::{ArrayRef, MapArray, StringArray, StructArray, UInt16Array, UInt64Array},
+    array::{
+        ArrayRef, Int32Array, Int64Array, MapArray, StringArray, StructArray, UInt16Array,
+        UInt64Array,
+    },
     buffer::OffsetBuffer,
     datatypes::{DataType, Field, Schema},
     record_batch::RecordBatch,
@@ -83,6 +86,24 @@ impl ParquetWriter {
                     }
                 },
             ))));
+            values.push(Arc::new(Int64Array::from_iter(self.places.iter().map(
+                |p| {
+                    if let Some(osm_changeset) = p.osm_changeset {
+                        osm_changeset.get()
+                    } else {
+                        0
+                    }
+                },
+            ))));
+            values.push(Arc::new(Int32Array::from_iter(self.places.iter().map(
+                |p| {
+                    if let Some(osm_version) = p.osm_version {
+                        osm_version.get()
+                    } else {
+                        0
+                    }
+                },
+            ))));
         } else {
             values.push(Arc::new(StringArray::from_iter_values(
                 self.places.iter().map(|p| p.source.as_str()),
@@ -156,6 +177,16 @@ fn make_schema(osm: bool) -> Schema {
         fields.push(Field::new(
             "osm_id",
             DataType::UInt64,
+            /* nullable */ false,
+        ));
+        fields.push(Field::new(
+            "osm_changeset",
+            DataType::Int64,
+            /* nullable */ false,
+        ));
+        fields.push(Field::new(
+            "osm_version",
+            DataType::Int32,
             /* nullable */ false,
         ));
     }

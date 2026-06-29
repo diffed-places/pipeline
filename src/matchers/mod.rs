@@ -350,6 +350,9 @@ impl<'a> Matcher for ShopMatcher<'a> {
         }
     }
 
+    // TODO: This is not really a Matcher task. Move this elsewhere,
+    // once we figure out what the final output format should be
+    // for the pipeline.
     fn suggest_edit(&self, osm_feature: &Place) -> Option<Place> {
         let osm_tags: HashMap<&str, &str> = osm_feature
             .tags
@@ -376,6 +379,8 @@ impl<'a> Matcher for ShopMatcher<'a> {
         Some(Place {
             s2_cell_id: osm_feature.s2_cell_id,
             osm_id: osm_feature.osm_id,
+            osm_changeset: osm_feature.osm_changeset,
+            osm_version: osm_feature.osm_version,
             source: self.atp_place.source.clone(),
             mask: osm_feature.mask,
             tags: tag_edits,
@@ -386,7 +391,10 @@ impl<'a> Matcher for ShopMatcher<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{num::NonZeroU64, sync::LazyLock};
+    use std::{
+        num::{NonZeroI32, NonZeroI64, NonZeroU64},
+        sync::LazyLock,
+    };
 
     #[test]
     fn test_match_distance() {
@@ -401,6 +409,8 @@ mod tests {
     static CH_CLOTHES_ATP: LazyLock<Place> = LazyLock::new(|| Place {
         s2_cell_id: 5159637664633565895,
         osm_id: None,
+        osm_changeset: None,
+        osm_version: None,
         source: String::from("atp/newyorker"),
         mask: MatchMask::SHOP,
         tags: tags(&[
@@ -421,6 +431,8 @@ mod tests {
     static CH_CLOTHES_OSM: LazyLock<Place> = LazyLock::new(|| Place {
         s2_cell_id: 5159637664662121729,
         osm_id: NonZeroU64::new(10761965859),
+        osm_changeset: NonZeroI64::new(149971213),
+        osm_version: NonZeroI32::new(4),
         source: String::from("osm"),
         mask: MatchMask(1),
         tags: tags(&[
@@ -438,6 +450,8 @@ mod tests {
     static CH_KIOSK_ATP: LazyLock<Place> = LazyLock::new(|| Place {
         s2_cell_id: 5159637400739491865,
         osm_id: None,
+        osm_changeset: None,
+        osm_version: None,
         source: String::from("atp/valora"),
         mask: MatchMask::SHOP,
         tags: tags(&[
@@ -457,6 +471,8 @@ mod tests {
     static CH_KIOSK_OSM: LazyLock<Place> = LazyLock::new(|| Place {
         s2_cell_id: 5159637400743919515,
         osm_id: NonZeroU64::new(6028968648),
+        osm_changeset: NonZeroI64::new(157167503),
+        osm_version: NonZeroI32::new(6),
         source: String::from("osm"),
         mask: MatchMask::SHOP,
         tags: tags(&[

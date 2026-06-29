@@ -10,6 +10,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, remove_file, rename};
 use std::io::{BufWriter, Cursor, Read, Seek, Write};
+use std::num::{NonZeroI32, NonZeroI64};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::sync_channel;
 use std::thread;
@@ -116,6 +117,7 @@ pub fn filter_relations<'a, R: Read + Seek + Send>(
                 let block = PrimitiveBlock::parse(&data);
                 for primitive in block.primitives() {
                     if let Primitive::Relation(rel) = primitive
+                        && let Some(ref info) = rel.info
                         && filter(rel.id, rel.tags(), covered_relations, coverage)
                     {
                         let tags: Vec<String> = rel
@@ -151,6 +153,8 @@ pub fn filter_relations<'a, R: Read + Seek + Send>(
 
                         rel_tx.send(Relation {
                             id: rel.id,
+                            changeset: get_changeset(info),
+                            version: get_version(info),
                             tags,
                             members,
                         })?;
@@ -276,7 +280,9 @@ pub fn filter_ways<'a, R: Read + Seek + Send>(
                 let data = blob.into_data(); // decompress
                 let block = PrimitiveBlock::parse(&data);
                 for primitive in block.primitives() {
-                    if let Primitive::Way(way) = primitive {
+                    if let Primitive::Way(way) = primitive
+                        && let Some(ref info) = way.info
+                    {
                         if filter(way.id, way.tags(), covered_ways, coverage) {
                             let nodes = collect_way_nodes(&way);
                             let tags: Vec<String> = way
@@ -288,6 +294,8 @@ pub fn filter_ways<'a, R: Read + Seek + Send>(
                             }
                             way_tx.send(Way {
                                 id: way.id,
+                                changeset: get_changeset(info),
+                                version: get_version(info),
                                 nodes,
                                 tags,
                             })?;
@@ -303,6 +311,8 @@ pub fn filter_ways<'a, R: Read + Seek + Send>(
                             }
                             way_tx.send(Way {
                                 id: way.id,
+                                changeset: get_changeset(info),
+                                version: get_version(info),
                                 nodes,
                                 tags: Vec::<String>::with_capacity(0),
                             })?;
@@ -440,7 +450,9 @@ pub fn filter_nodes<'a, R: Read + Seek + Send>(
                 let data = blob.into_data(); // decompress
                 let block = PrimitiveBlock::parse(&data);
                 for primitive in block.primitives() {
-                    if let Primitive::Node(node) = primitive {
+                    if let Primitive::Node(node) = primitive
+                        && let Some(ref info) = node.info
+                    {
                         if filter(node.id, node.tags.iter().copied(), covered_nodes, coverage) {
                             let tags: Vec<String> = node
                                 .tags
@@ -450,6 +462,8 @@ pub fn filter_nodes<'a, R: Read + Seek + Send>(
                             if let Some((lon_e7, lat_e7)) = round_coords(node.lon, node.lat) {
                                 node_tx.send(Node {
                                     id: node.id,
+                                    changeset: get_changeset(info),
+                                    version: get_version(info),
                                     tags,
                                     lon_e7,
                                     lat_e7,
@@ -542,6 +556,28 @@ pub fn filter_nodes<'a, R: Read + Seek + Send>(
     ));
 
     Ok(FilteredFile::open(&out_path)?)
+}
+
+fn get_changeset(info: &osm_pbf_iter::info::Info) -> Option<NonZeroI64> {
+    if let Some(changeset) = info.changeset
+        && changeset > 0
+        && changeset <= i64::MAX as u64
+    {
+        NonZeroI64::new(changeset as i64)
+    } else {
+        None
+    }
+}
+
+fn get_version(info: &osm_pbf_iter::info::Info) -> Option<NonZeroI32> {
+    if let Some(version) = info.version
+        && version > 0
+        && version <= i32::MAX as u32
+    {
+        NonZeroI32::new(version as i32)
+    } else {
+        None
+    }
 }
 
 /// Helper for `filter_nodes()`.
