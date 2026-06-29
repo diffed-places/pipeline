@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
+use std::num::{NonZeroI32, NonZeroI64};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{SyncSender, sync_channel};
 use std::thread;
@@ -97,7 +98,9 @@ pub fn import_osm(coverage: &Path, progress: &MultiProgress, workdir: &Path) -> 
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct Node {
-    id: u64,
+    id: u64, // TODO: NonZeroI64?
+    changeset: Option<NonZeroI64>,
+    version: Option<NonZeroI32>,
     tags: Vec<String>,
     lon_e7: i32,
     lat_e7: i32,
@@ -105,14 +108,18 @@ struct Node {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct Way {
-    id: u64,
+    id: u64, // TODO: NonZeroI64?
+    changeset: Option<NonZeroI64>,
+    version: Option<NonZeroI32>,
     nodes: Vec<u64>,
     tags: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct Relation {
-    id: u64,
+    id: u64, // TODO: NonZeroI64?
+    changeset: Option<NonZeroI64>,
+    version: Option<NonZeroI32>,
     tags: Vec<String>,
     members: Vec<RelationMember>,
 }

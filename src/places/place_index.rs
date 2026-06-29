@@ -1,4 +1,6 @@
-use arrow::array::{Array, MapArray, RecordBatch, StringArray, UInt16Array, UInt64Array};
+use arrow::array::{
+    Array, Int32Array, Int64Array, MapArray, RecordBatch, StringArray, UInt16Array, UInt64Array,
+};
 use arrow::compute::concat_batches;
 use lru::LruCache;
 use once_cell::sync::OnceCell;
@@ -6,7 +8,7 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::statistics::Statistics;
 use s2::cellid::CellID;
 use std::fs::File;
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::num::{NonZeroI32, NonZeroI64, NonZeroU64, NonZeroUsize};
 use std::ops::RangeInclusive;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -321,10 +323,38 @@ fn extract_place(batch: &RecordBatch, row: usize) -> anyhow::Result<Place> {
     Ok(Place {
         s2_cell_id: get_u64_required(batch, "s2_cell_id", row)?,
         osm_id: get_u64_optional(batch, "osm_id", row)?.and_then(NonZeroU64::new),
+        osm_changeset: get_i64_optional(batch, "osm_changeset", row)?.and_then(NonZeroI64::new),
+        osm_version: get_i32_optional(batch, "osm_version", row)?.and_then(NonZeroI32::new),
         source: get_string_required(batch, "source", row)?,
         mask: MatchMask(get_u16_required(batch, "mask", row)?),
         tags: get_tags(batch, row)?,
     })
+}
+
+fn get_i32_optional(batch: &RecordBatch, name: &str, row: usize) -> anyhow::Result<Option<i32>> {
+    let col = match batch.column_by_name(name) {
+        None => return Ok(None),
+        Some(c) => c,
+    };
+    Ok(Some(
+        col.as_any()
+            .downcast_ref::<Int32Array>()
+            .ok_or_else(|| anyhow::anyhow!("column '{name}' exists but is not Int32"))?
+            .value(row),
+    ))
+}
+
+fn get_i64_optional(batch: &RecordBatch, name: &str, row: usize) -> anyhow::Result<Option<i64>> {
+    let col = match batch.column_by_name(name) {
+        None => return Ok(None),
+        Some(c) => c,
+    };
+    Ok(Some(
+        col.as_any()
+            .downcast_ref::<Int64Array>()
+            .ok_or_else(|| anyhow::anyhow!("column '{name}' exists but is not Int64"))?
+            .value(row),
+    ))
 }
 
 fn get_u64_required(batch: &RecordBatch, name: &str, row: usize) -> anyhow::Result<u64> {

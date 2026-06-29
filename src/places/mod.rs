@@ -2,7 +2,7 @@ use crate::matchers::MatchMask;
 use deepsize::DeepSizeOf;
 use geo::Coord;
 use serde::{Deserialize, Serialize};
-use std::num::NonZeroU64;
+use std::num::{NonZeroI32, NonZeroI64, NonZeroU64};
 
 mod place_index;
 mod writer;
@@ -13,7 +13,9 @@ pub use writer::ParquetWriter;
 #[derive(Debug, DeepSizeOf, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub struct Place {
     pub s2_cell_id: u64,
-    pub osm_id: Option<NonZeroU64>,
+    pub osm_id: Option<NonZeroU64>,        // TODO: Option<NonZeroI64>?
+    pub osm_changeset: Option<NonZeroI64>, // TODO: Remove if not needed for MapRoulette.
+    pub osm_version: Option<NonZeroI32>,
     pub source: String,
     pub mask: MatchMask,
     pub tags: Vec<(String, String)>,
@@ -35,6 +37,8 @@ impl Place {
         Some(Place {
             s2_cell_id,
             osm_id: None,
+            osm_changeset: None,
+            osm_version: None,
             source,
             mask,
             tags,
@@ -45,6 +49,8 @@ impl Place {
         Place {
             s2_cell_id: self.s2_cell_id,
             osm_id: self.osm_id,
+            osm_changeset: self.osm_changeset,
+            osm_version: self.osm_version,
             source: self.source.clone(),
             mask: self.mask,
             tags: self.tags.clone(),
@@ -73,16 +79,29 @@ impl Place {
             .osm_id
             .map(|osm_id| geojson::feature::Id::Number(osm_id.get().into()));
 
+        let mut properties: serde_json::Map<String, serde_json::Value> = self
+            .tags
+            .iter()
+            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+            .collect();
+        if let Some(changeset) = self.osm_changeset {
+            properties.insert(
+                String::from("@osm_changeset"),
+                serde_json::Value::from(changeset.get()),
+            );
+        }
+        if let Some(version) = self.osm_version {
+            properties.insert(
+                String::from("@osm_version"),
+                serde_json::Value::from(version.get()),
+            );
+        }
+
         geojson::Feature {
             bbox: None,
             geometry: Some(geojson::Geometry::from(&point)),
             id,
-            properties: Some(
-                self.tags
-                    .iter()
-                    .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
-                    .collect(),
-            ),
+            properties: Some(properties),
             foreign_members: None,
         }
     }
